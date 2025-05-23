@@ -22,7 +22,7 @@
 | EPUB Parsing & Rendering       | ✅ Partially Implemented |
 | PDF/MOBI/TXT/HTML Support      | ⏳ To Do              |
 | Cover Art Extraction           | ✅ Partially Implemented |
-| Library Grid/List View         | ✅/⏳                 |
+| Library Grid/List View         | ⏳/✅                 |
 | Sorting, Filtering, Search     | ⏳ To Do              |
 | Bookmarks                      | ⏳ To Do              |
 | Reading Progress Display       | ⏳ To Do              |

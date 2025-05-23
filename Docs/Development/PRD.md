@@ -1,6 +1,6 @@
 # Product Requirements Document: "Novelist" - Core eReader Application
 
-**Current Project Status: Alpha - Core library management, import, EPUB metadata parsing, and basic custom EPUB chapter rendering (first chapter, unpaginated) implemented.**
+**Current Project Status: Alpha - Core library management and import implemented. EPUB rendering refactored into a modular system. Basic EPUB chapter rendering (scroll-based, TOC nav, font size, Base64 image handling) is functional for most content. Some edge cases with specific EPUB cover pages may require further investigation.**
 
 **1. Introduction**
 Novelist is an open-source, cross-platform eReader application designed for desktop (Windows, macOS, Linux) and mobile (iOS, Android). It aims to provide a clean, customizable, and powerful reading experience, with robust library management and a flexible plugin architecture to support future extensibility. **The primary technology stack for Novelist will be Flutter (using the Dart programming language) to ensure strong cross-platform capabilities, performance, and a cohesive development experience.**
@@ -37,16 +37,16 @@ Novelist is an open-source, cross-platform eReader application designed for desk
     *   FR1.2: Mobile: iOS, Android. - ✅ **Implemented (Project Structure)**
 *   **FR2: File Format Support (Leveraging Dart packages and Flutter rendering)**
     *   FR2.1: EPUB (EPUB 2 & EPUB 3) parsing and rendering.
-        *   Parsing for metadata (title, author via `epubx`): ✅ **Implemented** (Integrated into import flow)
-        *   Rendering (Custom viewer using `epubx` for parsing and `flutter_html` for rendering): ✅ **Partially Implemented** (Displays first chapter content, unpaginated. Basic chapter navigation, TOC, and font size adjustment implemented.)
-    *   FR2.2: PDF viewing (rendered as-is, reflow is out of scope for V1). - ⏳ **To Do**
+        *   Parsing for metadata (title, author via `epubx`): ✅ **Implemented** (Integrated into import flow via `MetadataService`)
+        *   Rendering (Custom viewer architecture): ✅ **Partially Implemented** (EPUB rendering logic in `EpubDocumentService`, `EpubController`, `EpubViewerWidget`. Supports scroll-based chapter viewing, TOC navigation, Base64 image embedding for `<img>` and `<image xlink:href>` tags via `_epubContentTypeToMimeType` mapping, chapter-to-chapter navigation, and font size adjustment. Most content and images render well; some specific EPUB cover page structures may not display as expected. Pagination not yet implemented.)
+    *   FR2.2: PDF viewing (rendered as-is, reflow is out of scope for V1). - ⏳ **To Do** (Placeholder `pdf` directory created in `core/rendering`)
     *   FR2.3: MOBI/AZW viewing (best effort, as it's a proprietary format). - ⏳ **To Do**
     *   FR2.4: Plain Text (.txt) and HTML (.html) file viewing. - ⏳ **To Do**
 *   **FR3: Library Management**
     *   FR3.1: Import books from local storage. - ✅ **Implemented** (File picking, copying to app storage, format detection, metadata extraction for EPUBs)
     *   FR3.2: Display book metadata (title, author, cover, series if available).
         *   Title/Author display in list: ✅ **Implemented** (Uses extracted metadata or filename fallback)
-        *   Cover art display in list: ✅ **Partially Implemented** (Logic in `library_screen.dart`, needs full cover extraction in `MetadataService` and saving path to `Book` model)
+        *   Cover art display in list: ✅ **Partially Implemented** (Logic in `library_screen.dart`, needs full cover extraction in `MetadataService` and saving path to `Book` model. Currently no cover images shown in list.)
         *   Series display: ⏳ **To Do**
     *   FR3.3: Grid and list view for the library.
         *   List view: ✅ **Implemented**
@@ -57,15 +57,17 @@ Novelist is an open-source, cross-platform eReader application designed for desk
     *   FR3.7: Ability to create, rename, and delete custom collections/shelves. - ⏳ **To Do**
     *   FR3.8: Ability to add/remove books from collections. - ⏳ **To Do**
 *   **FR4: Reading Experience (Built with Flutter widgets)**
-    *   FR4.1: Paginated view for reflowable formats (EPUB, MOBI, TXT, HTML). - ⏳ **To Do** (Current EPUB view is single scrollable chapter)
-    *   FR4.2: Font customization: size, family (selection of bundled and system fonts). - ✅ **Partially Implemented** (Font size adjustment in EPUB reader implemented; family selection To Do)
-    *   FR4.3: Layout customization: line spacing, margins. - ⏳ **To Do** (Basic paragraph spacing via `flutter_html` style; margins To Do)
+    *   FR4.1: Paginated view for reflowable formats (EPUB, MOBI, TXT, HTML). - ⏳ **To Do** (Current EPUB view is scrollable chapter-by-chapter via `EpubViewerWidget`)
+    *   FR4.2: Font customization: size, family (selection of bundled and system fonts).
+        *   Font size adjustment: ✅ **Implemented** (Managed by `EpubController`, UI in `ReadingScreen`'s settings dialog, applied in `EpubViewerWidget`).
+        *   Font family selection: ⏳ **To Do**
+    *   FR4.3: Layout customization: line spacing, margins. - ⏳ **To Do** (Basic paragraph spacing via `flutter_html` style in `EpubViewerWidget`; margins To Do)
     *   FR4.4: Themes: Light, Dark, Sepia. Custom theme support is a plus for later. - ⏳ **To Do** (Basic app theme structure in `main.dart`; reader themes To Do)
     *   FR4.5: Bookmarking: Add, view, delete, and navigate to bookmarks. - ⏳ **To Do**
-    *   FR4.6: Table of Contents navigation. - ✅ **Partially Implemented** (Basic TOC display from EPUB and navigation to chapters implemented; handling all EPUB TOC structures robustly is ongoing)
-    *   FR4.7: Reading progress display (percentage, current page/total pages, current chapter). - ⏳ **To Do** (Current chapter index is tracked; UI display To Do)
+    *   FR4.6: Table of Contents navigation. - ✅ **Implemented** (TOC extracted by `EpubDocumentService`, managed by `EpubController`, displayed and interactive in `ReadingScreen`'s dialog).
+    *   FR4.7: Reading progress display (percentage, current page/total pages, current chapter). - ⏳ **To Do** (Current chapter index tracked by `EpubController`; last read timestamp saved; UI display of progress To Do)
     *   FR4.8: Full-screen reading mode. - ⏳ **To Do**
-    *   FR4.9: Remember last read position for each book. - ✅ **Implemented** (Current chapter index and last read timestamp are saved to Hive)
+    *   FR4.9: Remember last read position for each book. - ✅ **Implemented** (Current chapter index from `EpubController` and last read timestamp are saved to Hive via `ReadingScreen`).
     *   FR4.10: Dictionary lookup (integration with OS-level dictionary services via platform channels if needed). - ⏳ **To Do**
 *   **FR5: Syncing** - ⏳ **To Do (All Sub-items)**
     *   FR5.1: User authentication...
@@ -79,20 +81,20 @@ Novelist is an open-source, cross-platform eReader application designed for desk
     *   FR6.2: Mechanism for discovering, loading...
     *   FR6.3: Basic permission model...
 *   **FR7: Settings**
-    *   FR7.1: General application settings (e.g., default theme, language). - ⏳ **To Do** (Placeholder screen exists, reader font size setting is local to reading screen)
+    *   FR7.1: General application settings (e.g., default theme, language). - ⏳ **To Do** (Placeholder `SettingsScreen` exists. Reader font size setting is handled within `ReadingScreen`/`EpubController`).
     *   FR7.2: Sync account management. - ⏳ **To Do**
     *   FR7.3: Plugin management interface. - ⏳ **To Do**
 
 **6. Non-Functional Requirements**
 *   **NFR1: Performance:**
     *   NFR1.1: App launch time < 3 seconds on modern hardware. - ⏳ **To Do (Pending Measurement)**
-    *   NFR1.2: Book opening time < 2 seconds for average-sized EPUBs. - ✅ **Partially Implemented** (EPUB parsing and first chapter load time seems acceptable for initial tests)
-    *   NFR1.3: Smooth page turning and scrolling (target 60fps+ via Flutter's rendering engine). - ⏳ **To Do** (Current chapter view is scrollable; pagination performance To Do)
+    *   NFR1.2: Book opening time < 2 seconds for average-sized EPUBs. - ✅ **Partially Implemented** (EPUB parsing via `EpubDocumentService` and first chapter load time seems acceptable. Base64 image conversion might add some overhead for image-heavy chapters, needs monitoring).
+    *   NFR1.3: Smooth page turning and scrolling (target 60fps+ via Flutter's rendering engine). - ✅ **Partially Implemented** (Current EPUB chapter view via `EpubViewerWidget` is scrollable; pagination performance To Do).
 *   **NFR2: Usability:**
-    *   NFR2.1: Intuitive and easy-to-navigate user interface, built with Flutter's flexible widget system. - ✅ **Partially Implemented** (Basic navigation and library UI exists, reader UI basic)
+    *   NFR2.1: Intuitive and easy-to-navigate user interface, built with Flutter's flexible widget system. - ✅ **Partially Implemented** (Basic navigation and library UI exists. Reader UI using `ReadingScreen` as a frame for `EpubViewerWidget` is functional and better structured).
     *   NFR2.2: Adherence to platform-specific UI/UX conventions where appropriate (using Cupertino widgets on iOS, Material on Android/Desktop, or custom consistent UI), while maintaining a consistent brand identity. - ⏳ **To Do**
     *   NFR2.3: Basic accessibility features (leveraging Flutter's built-in accessibility support). - ⏳ **To Do**
-*   **NFR3: Stability:** The application should be robust and minimize crashes. Dart's strong typing and Flutter's tooling will aid this. - ✅ **Partially Implemented** (Ongoing effort, basic error handling in place, custom EPUB parsing is more stable than previous plugin attempt)
+*   **NFR3: Stability:** The application should be robust and minimize crashes. Dart's strong typing and Flutter's tooling will aid this. - ✅ **Partially Implemented** (Base64 image embedding adds complexity, ongoing testing needed. Error handling for missing images in place. ErrorHandler scope parameter added).
 *   **NFR4: Security:** Secure handling of cloud service credentials (e.g., using system keychain via packages like `flutter_secure_storage`, OAuth tokens not stored insecurely). - ⏳ **To Do**
 *   **NFR5: Open Source:**
     *   NFR5.1: Codebase hosted on a public repository (e.g., GitHub, GitLab). - ✅ **Implemented**
@@ -101,7 +103,7 @@ Novelist is an open-source, cross-platform eReader application designed for desk
     *   NFR5.4: Technology Stack: Primarily Flutter and Dart, facilitating easier contributions from the Flutter community. - ✅ **Implemented**
 
 **7. Design Considerations (High-Level)**
-*   Clean, minimalist UI that prioritizes the reading content, achievable with Flutter's custom rendering capabilities. - ✅ **Partially Implemented** (Current UI is basic but functional)
+*   Clean, minimalist UI that prioritizes the reading content, achievable with Flutter's custom rendering capabilities. - ✅ **Partially Implemented** (Current UI is basic but functional. Refactor provides a cleaner foundation for reader UI).
 *   Consistent design language across all platforms, with adaptations for native feel where necessary. - ⏳ **To Do**
 *   Visual indicators for sync status. - ⏳ **To Do**
 
@@ -117,6 +119,7 @@ Novelist is an open-source, cross-platform eReader application designed for desk
 *   Built-in ebook store integrations.
 *   Social reading features (sharing progress, recommendations).
 *   Support for more niche ebook formats.
+*   Advanced EPUB cover page rendering for all edge cases.
 *   The two specific plugins (AI Audiobook, Crypto Storage) are separate but rely on this core and will also be developed using Dart/Flutter.
 
 **Legend:**

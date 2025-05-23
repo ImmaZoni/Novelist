@@ -1,7 +1,6 @@
 # Project Structure
 
 ```
-README.md
 analysis_options.yaml
 /android
 /ios
@@ -10,6 +9,13 @@ analysis_options.yaml
 -- app_constants.dart
 -- app_routes.dart
 -- error_handler.dart
+-- /rendering
+--- /epub
+---- epub_controller.dart
+---- epub_document_service.dart
+---- epub_viewer_widget.dart
+---- toc_entry.dart
+--- /pdf
 -- utils.dart
 - main.dart
 - /models
@@ -33,28 +39,6 @@ pubspec.yaml
 ```
 
 # File Contents
-
-## README.md
-
-```markdown
-# novelist
-
-A new Flutter project.
-
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
-
-```
 
 ## analysis_options.yaml
 
@@ -224,9 +208,9 @@ class AppRoutes {
 import 'package:flutter/foundation.dart'; // For kDebugMode
 
 class ErrorHandler {
-  static void recordError(dynamic error, StackTrace? stackTrace, {String? reason, bool fatal = false}) {
+  static void recordError(dynamic error, StackTrace? stackTrace, {String? reason, bool fatal = false, String? scope}) { // ADDED scope
     if (kDebugMode) {
-      print('-------------------------------- ERROR --------------------------------');
+      print('-------------------------------- ERROR (${scope ?? 'Global'}) --------------------------------');
       if (reason != null) {
         print('Reason: $reason');
       }
@@ -247,29 +231,551 @@ class ErrorHandler {
     // }
   }
 
-  static void logInfo(String message, {String? scope}) {
+  static void logInfo(String message, {String? scope}) { // scope was already here, ensure consistency
     if (kDebugMode) {
       print('[INFO${scope != null ? ' - $scope' : ''}] $message');
     }
     // TODO: Optionally log to a file or analytics in production
   }
 
-  static void logWarning(String message, {String? scope}) {
+  static void logWarning(String message, {String? scope}) { // scope was already here, ensure consistency
      if (kDebugMode) {
       print('[WARNING${scope != null ? ' - $scope' : ''}] $message');
     }
     // TODO: Optionally log to a file or analytics in production
   }
 }
+```
 
-// Example usage:
-// try {
-//   // ... some operation
-// } catch (e, s) {
-//   ErrorHandler.recordError(e, s, reason: 'Failed to load books');
-// }
-//
-// ErrorHandler.logInfo('User opened library screen.');
+## lib/core/rendering/epub/epub_controller.dart
+
+```dart
+// lib/core/rendering/epub/epub_controller.dart
+import 'package:flutter/foundation.dart'; // For ChangeNotifier
+import 'package:novelist/models/book.dart';
+import 'package:novelist/core/rendering/epub/epub_document_service.dart';
+import 'package:novelist/core/rendering/epub/toc_entry.dart';
+import 'package:novelist/core/error_handler.dart';
+import 'package:epubx/epubx.dart' as epubx;
+
+class EpubController with ChangeNotifier {
+  final Book _book; // The book object passed from ReadingScreen
+  final EpubDocumentService _documentService;
+
+  EpubController({required Book book})
+      : _book = book,
+        _documentService = EpubDocumentService();
+
+  // --- State ---
+  bool _isLoading = true;
+  bool get isLoading => _isLoading;
+
+  String? _loadingError;
+  String? get loadingError => _loadingError;
+
+  String? _currentChapterHtmlContent;
+  String? get currentChapterHtmlContent => _currentChapterHtmlContent;
+
+  int _currentChapterIndex = 0;
+  int get currentChapterIndex => _currentChapterIndex;
+
+  double _currentFontSize = 16.0; // Default font size
+  double get currentFontSize => _currentFontSize;
+
+  List<TocEntry> _tocList = [];
+  List<TocEntry> get tableOfContents => _tocList;
+
+  String? _bookTitleFromEpub;
+  String? get bookTitleFromEpub => _bookTitleFromEpub;
+
+  int _totalChapters = 0;
+  int get totalChapters => _totalChapters;
+
+  // --- Initialization ---
+  Future<void> initialize() async {
+    _isLoading = true;
+    _loadingError = null;
+    notifyListeners();
+
+    try {
+      final success = await _documentService.loadBook(_book.filePath);
+      if (success) {
+        _bookTitleFromEpub = _documentService.bookTitle ?? _book.title; // Fallback to book model title
+        _tocList = _documentService.tableOfContents;
+        _totalChapters = _documentService.getChapterCount();
+        
+        // Load last read chapter index or default to 0
+        _currentChapterIndex = _book.currentChapterIndex ?? 0;
+        if (_totalChapters > 0 && _currentChapterIndex >= _totalChapters) {
+            ErrorHandler.logWarning(
+                "Saved chapter index $_currentChapterIndex out of bounds for book with $_totalChapters chapters. Resetting to 0.",
+                scope: "EpubController"
+            );
+            _currentChapterIndex = 0;
+        } else if (_totalChapters == 0 && _currentChapterIndex != 0) {
+            ErrorHandler.logWarning(
+                "Book has 0 chapters but saved index is $_currentChapterIndex. Resetting to 0.",
+                scope: "EpubController"
+            );
+            _currentChapterIndex = 0;
+        }
+
+        await _loadChapter(_currentChapterIndex, isInitializing: true);
+      } else {
+        _loadingError = "Failed to load EPUB document.";
+        _isLoading = false;
+      }
+    } catch (e, s) {
+      ErrorHandler.recordError(e, s, reason: "Error initializing EpubController for ${_book.title}", scope: "EpubController");
+      _loadingError = "An unexpected error occurred: $e";
+      _isLoading = false;
+    } finally {
+      if (_loadingError != null) {
+        _isLoading = false; // Ensure loading is false if an error occurred during loading process
+      }
+      notifyListeners();
+    }
+  }
+
+  // --- Chapter Loading and Navigation ---
+  Future<void> _loadChapter(int chapterIndex, {bool isInitializing = false}) async {
+    if (!isInitializing) { // Don't set loading true if just initializing and chapter load is part of it
+      _isLoading = true;
+      notifyListeners();
+    }
+
+    _currentChapterHtmlContent = _documentService.getChapterHtmlContent(chapterIndex);
+    _currentChapterIndex = chapterIndex; // Update the index
+
+    if (_currentChapterHtmlContent == null) {
+      ErrorHandler.logWarning(
+          "Chapter content is null for index $chapterIndex in '${_book.title}'. Total chapters: $_totalChapters.",
+          scope: "EpubController");
+      _currentChapterHtmlContent = "<p>Error: Could not load chapter content.</p>";
+      // Potentially set _loadingError here too if this is a critical failure
+    }
+    
+    _isLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> navigateToChapter(int chapterIndex) async {
+    if (chapterIndex >= 0 && chapterIndex < _totalChapters) {
+      await _loadChapter(chapterIndex);
+      // Note: Saving progress will be handled by ReadingScreen or a dedicated service when needed
+    } else {
+      ErrorHandler.logWarning(
+          "Attempted to navigate to invalid chapter index: $chapterIndex. Total chapters: $_totalChapters.",
+          scope: "EpubController");
+    }
+  }
+
+  Future<void> navigateToTocEntry(TocEntry tocEntry) async {
+    int targetChapterIndex = tocEntry.chapterIndexForDisplayLogic;
+
+    if (targetChapterIndex != -1) {
+      await navigateToChapter(targetChapterIndex);
+    } else if (tocEntry.targetFileHref != null) {
+      // This logic attempts to find a spine index based on href if chapterIndexForDisplayLogic was -1
+      // This might be redundant if _findSpineIndexForNavPoint in EpubDocumentService is robust
+      int foundIndex = -1;
+      final epubx.EpubBook? epubData = _documentService.epubBookData;
+      final List<epubx.EpubSpineItemRef>? spineItems = epubData?.Schema?.Package?.Spine?.Items;
+      
+      if (epubData != null && spineItems != null) {
+        String targetHref = tocEntry.targetFileHref!.split('#').first;
+        for (var i = 0; i < spineItems.length; i++) {
+          epubx.EpubManifestItem? manifestItem;
+          try {
+            manifestItem = epubData.Schema?.Package?.Manifest?.Items
+                ?.firstWhere((item) => item.Id == spineItems[i].IdRef);
+          } catch (_) { manifestItem = null; }
+
+          if (manifestItem?.Href == targetHref) {
+            foundIndex = i;
+            break;
+          }
+        }
+      }
+      
+      if (foundIndex != -1) {
+        await navigateToChapter(foundIndex);
+      } else {
+        ErrorHandler.logWarning(
+            "Could not navigate to TOC entry by targetFileHref: ${tocEntry.title} (href: ${tocEntry.targetFileHref})",
+            scope: "EpubController");
+      }
+    } else {
+         ErrorHandler.logWarning(
+            "Could not navigate to TOC entry (no valid index/target): ${tocEntry.title}",
+            scope: "EpubController");
+    }
+  }
+
+  Future<void> nextChapter() async {
+    if (_currentChapterIndex < _totalChapters - 1) {
+      await navigateToChapter(_currentChapterIndex + 1);
+    }
+  }
+
+  Future<void> previousChapter() async {
+    if (_currentChapterIndex > 0) {
+      await navigateToChapter(_currentChapterIndex - 1);
+    }
+  }
+
+  // --- Settings ---
+  void setFontSize(double size) {
+    _currentFontSize = size.clamp(10.0, 30.0); // Clamp to reasonable values
+    notifyListeners();
+  }
+
+  // --- Lifecycle ---
+  @override
+  void dispose() {
+    ErrorHandler.logInfo("EpubController disposing for ${_book.title}.", scope: "EpubController");
+    _documentService.dispose();
+    super.dispose();
+  }
+}
+```
+
+## lib/core/rendering/epub/epub_document_service.dart
+
+```dart
+// lib/core/rendering/epub/epub_document_service.dart
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:epubx/epubx.dart' as epubx;
+import 'package:novelist/core/error_handler.dart';
+import 'package:novelist/core/rendering/epub/toc_entry.dart';
+
+class EpubDocumentService {
+  epubx.EpubBook? _epubBookData;
+  List<TocEntry> _tocList = [];
+  String? _bookTitle; // Store the title separately after parsing
+
+  // Public getters
+  epubx.EpubBook? get epubBookData => _epubBookData;
+  List<TocEntry> get tableOfContents => _tocList;
+  String? get bookTitle => _bookTitle;
+
+  Future<bool> loadBook(String filePath) async {
+    try {
+      File bookFile = File(filePath);
+      if (!await bookFile.exists()) {
+        ErrorHandler.logWarning("EPUB file not found at path: $filePath", scope: "EpubDocumentService");
+        return false;
+      }
+      Uint8List bytes = await bookFile.readAsBytes();
+      _epubBookData = await epubx.EpubReader.readBook(bytes);
+      _bookTitle = _epubBookData?.Title;
+
+      _buildTocList();
+      return true;
+    } catch (e, s) {
+      ErrorHandler.recordError(e, s, reason: "Failed to load EPUB for $filePath", scope: "EpubDocumentService");
+      _epubBookData = null;
+      _tocList = [];
+      _bookTitle = null;
+      return false;
+    }
+  }
+
+  void _buildTocList() {
+    _tocList = [];
+    if (_epubBookData == null) return;
+
+    final epubx.EpubNavigation? nav = _epubBookData!.Schema?.Navigation;
+    final epubx.EpubNavigationMap? navMap = nav?.NavMap;
+
+    if (navMap != null && navMap.Points != null && navMap.Points!.isNotEmpty) {
+      void addNavPointsRecursive(List<epubx.EpubNavigationPoint> points, int depth) {
+        for (var point in points) {
+          int displayIndex = _findSpineIndexForNavPoint(point);
+          String? labelText = (point.NavigationLabels != null && point.NavigationLabels!.isNotEmpty)
+              ? point.NavigationLabels!.first.Text
+              : null;
+
+          if (labelText != null) {
+            _tocList.add(TocEntry(
+              title: labelText,
+              chapterIndexForDisplayLogic: displayIndex,
+              depth: depth,
+              targetFileHref: point.Content?.Source,
+            ));
+          }
+          if (point.ChildNavigationPoints != null && point.ChildNavigationPoints!.isNotEmpty) {
+            addNavPointsRecursive(point.ChildNavigationPoints!, depth + 1);
+          }
+        }
+      }
+      addNavPointsRecursive(navMap.Points!, 0); // Assuming Points is not null if navMap is not null and Points is not empty
+    }
+
+    // Fallback to NCX chapters if NAV map TOC is empty or not found
+    if (_tocList.isEmpty && _epubBookData!.Chapters?.isNotEmpty == true) {
+      ErrorHandler.logInfo("NAV TOC empty or not found, falling back to NCX Chapters for TOC.", scope: "EpubDocumentService");
+      for (var i = 0; i < _epubBookData!.Chapters!.length; i++) {
+        var chapter = _epubBookData!.Chapters![i];
+        if (chapter.Title != null) {
+          _tocList.add(TocEntry(
+            title: chapter.Title!,
+            chapterIndexForDisplayLogic: i, // This might need adjustment if NCX chapters don't align 1:1 with spine items used for display
+            depth: 0,
+            targetFileHref: chapter.ContentFileName,
+          ));
+        }
+      }
+    }
+  }
+
+  int _findSpineIndexForNavPoint(epubx.EpubNavigationPoint navPoint) {
+    final String? targetFile = navPoint.Content?.Source?.split('#').first;
+    if (targetFile == null || _epubBookData == null) return -1;
+
+    final List<epubx.EpubSpineItemRef>? spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
+    if (spineItems == null) return -1;
+
+    for (var i = 0; i < spineItems.length; i++) {
+      epubx.EpubManifestItem? manifestItem;
+      try {
+        manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
+            ?.firstWhere((item) => item.Id == spineItems[i].IdRef);
+      } catch (_) {
+        manifestItem = null; // Not found
+      }
+      if (manifestItem?.Href == targetFile) {
+        return i;
+      }
+    }
+    return -1; // Not found in spine
+  }
+
+  int getChapterCount() {
+    if (_epubBookData == null) return 0;
+    // Prefer spine items as they represent the linear reading order
+    return _epubBookData!.Schema?.Package?.Spine?.Items?.length ??
+           _epubBookData!.Chapters?.length ?? 0;
+  }
+
+  String? getChapterHtmlContent(int chapterIndex) {
+    if (_epubBookData == null || chapterIndex < 0) return null;
+
+    String? chapterHtmlContent;
+    final List<epubx.EpubSpineItemRef>? spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
+
+    // Try to get content based on spine (preferred)
+    if (spineItems != null && chapterIndex < spineItems.length) {
+      final epubx.EpubSpineItemRef spineItem = spineItems[chapterIndex];
+      epubx.EpubManifestItem? manifestItem;
+      try {
+        manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
+            ?.firstWhere((item) => item.Id == spineItem.IdRef);
+      } catch (_) {
+        manifestItem = null;
+      }
+
+      final String? hrefKey = manifestItem?.Href;
+      if (hrefKey != null && _epubBookData!.Content?.Html?.containsKey(hrefKey) == true) {
+        chapterHtmlContent = _epubBookData!.Content!.Html![hrefKey]!.Content;
+      }
+    }
+
+    // Fallback to legacy Chapters if spine method fails or content is null
+    if (chapterHtmlContent == null) {
+      ErrorHandler.logInfo("Could not get chapter $chapterIndex via spine, trying legacy Chapters.", scope: "EpubDocumentService");
+      final List<epubx.EpubChapter>? chapters = _epubBookData!.Chapters;
+      if (chapters != null && chapterIndex < chapters.length) {
+        final epubx.EpubChapter chapter = chapters[chapterIndex];
+        chapterHtmlContent = chapter.HtmlContent;
+        if (chapterHtmlContent == null && chapter.ContentFileName != null) {
+          // Try to get content from ContentFileName if HtmlContent is null
+          final epubx.EpubTextContentFile? chapterFile = _epubBookData!.Content?.Html?[chapter.ContentFileName!];
+          chapterHtmlContent = chapterFile?.Content;
+        }
+      }
+    }
+    
+    if (chapterHtmlContent == null) {
+      ErrorHandler.logWarning("Still null content for chapter index $chapterIndex after all attempts.", scope: "EpubDocumentService");
+    }
+
+    return chapterHtmlContent;
+  }
+
+  void dispose() {
+    _epubBookData = null;
+    _tocList = [];
+    _bookTitle = null;
+    ErrorHandler.logInfo("EpubDocumentService disposed.", scope: "EpubDocumentService");
+  }
+}
+```
+
+## lib/core/rendering/epub/epub_viewer_widget.dart
+
+```dart
+// lib/core/rendering/epub/epub_viewer_widget.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_html/flutter_html.dart';
+import 'package:novelist/core/app_constants.dart';
+import 'package:novelist/core/error_handler.dart';
+import 'package:novelist/core/rendering/epub/epub_controller.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+class EpubViewerWidget extends StatefulWidget {
+  final EpubController controller;
+  final ScrollController scrollController; // Pass scroll controller from ReadingScreen
+
+  const EpubViewerWidget({
+    super.key,
+    required this.controller,
+    required this.scrollController,
+  });
+
+  @override
+  State<EpubViewerWidget> createState() => _EpubViewerWidgetState();
+}
+
+class _EpubViewerWidgetState extends State<EpubViewerWidget> {
+  @override
+  void initState() {
+    super.initState();
+    // Listen to controller changes to rebuild the widget
+    widget.controller.addListener(_onControllerUpdate);
+  }
+
+  @override
+  void didUpdateWidget(covariant EpubViewerWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.controller != oldWidget.controller) {
+      oldWidget.controller.removeListener(_onControllerUpdate);
+      widget.controller.addListener(_onControllerUpdate);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerUpdate);
+    super.dispose();
+  }
+
+  void _onControllerUpdate() {
+    // This is called when notifyListeners() is called in the controller
+    if (mounted) {
+      setState(() {
+        // The widget will rebuild with new data from the controller
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.controller; // Convenience
+
+    if (controller.isLoading && controller.currentChapterHtmlContent == null) {
+      // Show loading indicator only if content isn't already available (e.g., initial load)
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (controller.loadingError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(kDefaultPadding),
+          child: Text(
+            "Error: ${controller.loadingError}",
+            style: const TextStyle(color: Colors.red),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
+    if (controller.currentChapterHtmlContent == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(kDefaultPadding),
+          child: Text("No content available for this chapter."),
+        ),
+      );
+    }
+
+    // If loading a new chapter but old content exists, show old content with an overlay indicator.
+    // This provides a smoother experience than a blank screen.
+    // However, for simplicity now, we'll just rebuild. A more advanced version might use a Stack.
+
+    return SingleChildScrollView(
+      controller: widget.scrollController, // Use the passed ScrollController
+      padding: const EdgeInsets.all(kDefaultPadding),
+      child: Html(
+        data: controller.currentChapterHtmlContent!,
+        style: {
+          "body": Style(
+            fontSize: FontSize(controller.currentFontSize),
+            lineHeight: LineHeight.em(1.5),
+            // Potentially add theme-based text color here later
+          ),
+          "p": Style(margin: Margins.only(bottom: controller.currentFontSize * 0.5)),
+          "h1": Style(fontSize: FontSize(controller.currentFontSize * 1.8), fontWeight: FontWeight.bold),
+          "h2": Style(fontSize: FontSize(controller.currentFontSize * 1.5), fontWeight: FontWeight.bold),
+          "h3": Style(fontSize: FontSize(controller.currentFontSize * 1.3), fontWeight: FontWeight.bold),
+          // Add more styles as needed
+        },
+        onLinkTap: (url, attributes, element) async {
+          ErrorHandler.logInfo("Link tapped: $url", scope: "EpubViewerWidget");
+          if (url != null) {
+            final uri = Uri.tryParse(url);
+            if (uri != null && (uri.isScheme("HTTP") || uri.isScheme("HTTPS"))) {
+              try {
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                } else {
+                  throw 'Could not launch $url';
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not launch $url: $e')),
+                  );
+                }
+              }
+            } else {
+              // Handle internal EPUB links (e.g., footnotes, cross-references)
+              // This is more complex and might involve parsing the href to find a target
+              // within the current EPUB document or another spine item.
+              // For now, just log and show a message.
+              ErrorHandler.logInfo("Internal EPUB link tapped: $url. Navigation not yet implemented.", scope: "EpubViewerWidget");
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Internal link navigation not yet implemented: $url')),
+                );
+              }
+            }
+          }
+        },
+      ),
+    );
+  }
+}
+```
+
+## lib/core/rendering/epub/toc_entry.dart
+
+```dart
+class TocEntry {
+  final String title;
+  final int chapterIndexForDisplayLogic; // Index for direct navigation if known
+  final int depth;
+  final String? targetFileHref; // Actual href, e.g., "chapter1.xhtml#section2"
+
+  TocEntry({
+    required this.title,
+    required this.chapterIndexForDisplayLogic,
+    this.depth = 0,
+    this.targetFileHref,
+  });
+}
 ```
 
 ## lib/core/utils.dart
@@ -1052,35 +1558,17 @@ await _libraryService.addBook(newBook);
 
 ```dart
 // lib/ui/screens/reading_screen.dart
-import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:novelist/models/book.dart';
-import 'package:novelist/core/error_handler.dart';
 import 'package:novelist/services/library_service.dart';
-import 'package:epubx/epubx.dart' as epubx;
-import 'package:flutter_html/flutter_html.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:novelist/core/error_handler.dart';
 import 'package:novelist/core/app_constants.dart';
-// import 'package:path/path.dart' as p; // Remove if not used directly in this file
-
-class TocEntry {
-  final String title;
-  final int chapterIndexForDisplayLogic;
-  final int depth;
-  final String? targetFile; // Href of the chapter file
-
-  TocEntry({
-    required this.title,
-    required this.chapterIndexForDisplayLogic,
-    this.depth = 0,
-    this.targetFile,
-  });
-}
+import 'package:novelist/core/rendering/epub/epub_controller.dart';
+import 'package:novelist/core/rendering/epub/epub_viewer_widget.dart';
+import 'package:novelist/core/rendering/epub/toc_entry.dart'; // Still needed for TOC dialog
 
 class ReadingScreen extends StatefulWidget {
   final Book book;
-
   const ReadingScreen({super.key, required this.book});
 
   @override
@@ -1089,367 +1577,191 @@ class ReadingScreen extends StatefulWidget {
 
 class _ReadingScreenState extends State<ReadingScreen> {
   final LibraryService _libraryService = LibraryService();
-  epubx.EpubBook? _epubBookData;
-  String? _currentChapterContent;
-  bool _isLoading = true;
-  String? _loadingError;
+  late final EpubController _epubController; // For EPUBs
+  // Add controllers for other formats later, e.g., PdfController _pdfController;
 
-  int _currentChapterIndex = 0;
-  double _currentFontSize = 16.0;
-  final ScrollController _scrollController = ScrollController();
-  List<TocEntry> _tocList = [];
+  final ScrollController _scrollController = ScrollController(); // For scrolling content
+
+  bool _isInitialized = false; // To track if controller initialization is done
 
   @override
   void initState() {
     super.initState();
-    _currentChapterIndex = widget.book.currentChapterIndex ?? 0;
-    _initialLoadEpub();
+
+    if (widget.book.format == BookFormat.epub) {
+      _epubController = EpubController(book: widget.book);
+      _initializeReader();
+    } else {
+      // Handle unsupported formats or initialize other controllers
+      ErrorHandler.logWarning("Unsupported book format in ReadingScreen: ${widget.book.format}", scope: "ReadingScreen");
+      // Potentially set an error state to display a message
+    }
+  }
+
+  Future<void> _initializeReader() async {
+    if (widget.book.format == BookFormat.epub) {
+      // Listen to controller changes to update UI if needed (e.g., app bar title)
+      _epubController.addListener(_onReaderControllerUpdate);
+      await _epubController.initialize();
+    }
+    // Add init for other formats here
+
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+      // Jump to top after initial load if controller manages scrolling,
+      // or ensure EpubViewerWidget does this.
+      if (_scrollController.hasClients) {
+         _scrollController.jumpTo(0.0);
+      }
+    }
+  }
+
+  void _onReaderControllerUpdate() {
+    // This is called when notifyListeners() is called in the controller.
+    // Useful if ReadingScreen itself needs to rebuild based on controller state (e.g., app bar title)
+    if (mounted) {
+      setState(() {
+        // Example: Update AppBar title if it depends on controller.bookTitleFromEpub
+      });
+    }
   }
 
   @override
   void dispose() {
-    _saveReadingProgress();
+    if (widget.book.format == BookFormat.epub) {
+      _epubController.removeListener(_onReaderControllerUpdate);
+      _saveReadingProgress(); // Save progress before disposing controller
+      _epubController.dispose();
+    }
     _scrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _initialLoadEpub() async {
-    // ... (same as previous correct version)
-    if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-      _loadingError = null;
-    });
-    try {
-      if (widget.book.format != BookFormat.epub) {
-        throw Exception("Unsupported format: ${widget.book.format}");
-      }
-
-      File bookFile = File(widget.book.filePath);
-      if (!await bookFile.exists()) {
-        throw Exception("Book file not found: ${widget.book.filePath}");
-      }
-      Uint8List bytes = await bookFile.readAsBytes();
-      epubx.EpubBook epub = await epubx.EpubReader.readBook(bytes);
-
-      if (!mounted) return;
-      setState(() {
-        _epubBookData = epub;
-        _buildTocList();
-      });
-
-      int chapterCount = _getChapterCount();
-      if (chapterCount > 0 && _currentChapterIndex >= chapterCount) {
-        _currentChapterIndex = 0;
-      } else if (chapterCount == 0 && _currentChapterIndex != 0) {
-        _currentChapterIndex = 0;
-      }
-      
-      await _displayChapter(_currentChapterIndex, fromInit: true);
-
-    } catch (e, s) {
-      ErrorHandler.recordError(e, s, reason: "Failed to load EPUB for ${widget.book.title}");
-      if (mounted) {
-        setState(() {
-          _loadingError = "Error loading book: $e";
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
-  int _getChapterCount() {
-    return _epubBookData?.Schema?.Package?.Spine?.Items?.length ?? 
-           _epubBookData?.Chapters?.length ?? 
-           0;
-  }
-
-  Future<void> _displayChapter(int chapterIndex, {bool fromInit = false}) async {
-    // ... (ensure null checks for _epubBookData and its nested properties)
-    if (_epubBookData == null || !mounted) return;
-
-    if (!fromInit) {
-      await _saveReadingProgress();
-    }
-    
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-        _currentChapterIndex = chapterIndex;
-      });
-    }
-
-    String? chapterHtmlContent;
-    final spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
-
-    if (spineItems != null && spineItems.isNotEmpty) {
-      if (chapterIndex >= 0 && chapterIndex < spineItems.length) {
-        final spineItem = spineItems[chapterIndex];
-        final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
-            ?.firstWhere((item) => item.Id == spineItem.IdRef,
-                orElse: () => epubx.EpubManifestItem()
-            );
-        
-        final String? hrefKey = manifestItem?.Href;
-        if (hrefKey != null && 
-            _epubBookData!.Content?.Html?.containsKey(hrefKey) == true) {
-          chapterHtmlContent = _epubBookData!.Content!.Html![hrefKey]!.Content;
-        }
-      }
-    }
-
-    if (chapterHtmlContent == null) {
-      List<epubx.EpubChapter>? chapters = _epubBookData!.Chapters;
-      if (chapters != null && chapterIndex >= 0 && chapterIndex < chapters.length) {
-        epubx.EpubChapter chapter = chapters[chapterIndex];
-        chapterHtmlContent = chapter.HtmlContent;
-        if (chapterHtmlContent == null && chapter.ContentFileName != null) {
-          final chapterFile = _epubBookData!.Content?.Html?[chapter.ContentFileName!];
-          if (chapterFile != null) {
-            chapterHtmlContent = chapterFile.Content;
-          }
-        }
-      }
-    }
-    
-    if (!mounted) return;
-    if (chapterHtmlContent != null) {
-      setState(() {
-        _currentChapterContent = chapterHtmlContent;
-        _isLoading = false;
-      });
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(0.0);
-      }
-    } else {
-      ErrorHandler.logWarning("Could not load content for chapter index $chapterIndex", scope: "ReadingScreen");
-      setState(() {
-        _currentChapterContent = "<p>Error: Could not load chapter content for index $chapterIndex.</p>";
-        _isLoading = false;
-      });
-    }
-  }
-
-  void _buildTocList() {
-    _tocList = [];
-    if (_epubBookData == null) return;
-
-    final nav = _epubBookData!.Schema?.Navigation;
-    final List<epubx.EpubNavigationMap>? navMaps = nav?.NavMap;
-
-    if (navMaps != null && navMaps.isNotEmpty) {
-      // Try to find a navMap with points (usually the first one if it exists)
-      epubx.EpubNavigationMap? mainNavMap;
-      for (var map in navMaps) {
-        if (map.Points.isNotEmpty) {
-          mainNavMap = map;
-          break;
-        }
-      }
-
-      if (mainNavMap != null && mainNavMap.Points.isNotEmpty) {
-         void addNavPoints(List<epubx.EpubNavigationPoint> points, int depth) {
-            for (var point in points) {
-              int spineIndex = _findSpineIndexForNavPoint(point);
-              if (point.Label != null) {
-                 _tocList.add(TocEntry(
-                    title: point.Label!,
-                    chapterIndexForDisplayLogic: spineIndex, // Can be -1 if not directly in spine
-                    depth: depth,
-                    targetFile: point.Content?.Source
-                  ));
-              }
-              if (point.ChildNavigationPoints != null && point.ChildNavigationPoints!.isNotEmpty) { // Null check before isNotEmpty
-                addNavPoints(point.ChildNavigationPoints!, depth + 1);
-              }
-            }
-         }
-        addNavPoints(mainNavMap.Points, 0);
-      }
-    }
-    // Fallback to _epubBookData.Chapters if NavMap is not good or empty
-    if (_tocList.isEmpty && _epubBookData!.Chapters?.isNotEmpty == true) {
-       for (var i = 0; i < _epubBookData!.Chapters!.length; i++) {
-         var chapter = _epubBookData!.Chapters![i];
-         if (chapter.Title != null) {
-            _tocList.add(TocEntry(
-              title: chapter.Title!,
-              chapterIndexForDisplayLogic: i, 
-              depth: 0, 
-              targetFile: chapter.ContentFileName
-            ));
-         }
-       }
-    }
-  }
-
-  int _findSpineIndexForNavPoint(epubx.EpubNavigationPoint navPoint) {
-    final String? targetFile = navPoint.Content?.Source?.split('#').first;
-    if (targetFile == null || _epubBookData?.Schema?.Package?.Spine?.Items == null) return -1;
-
-    final spineItems = _epubBookData!.Schema!.Package!.Spine!.Items!; // Safe after null check
-    for (var i = 0; i < spineItems.length; i++) {
-        final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
-            ?.firstWhere((item) => item.Id == spineItems[i].IdRef, orElse: () => epubx.EpubManifestItem());
-        if (manifestItem?.Href == targetFile) {
-            return i;
-        }
-    }
-    return -1;
-  }
-
-  void _goToChapterByTocEntry(TocEntry tocEntry) {
-    if (mounted) Navigator.of(context).pop();
-    if (_epubBookData == null) return;
-    
-    if (tocEntry.chapterIndexForDisplayLogic != -1) {
-        _displayChapter(tocEntry.chapterIndexForDisplayLogic);
-    } else if (tocEntry.targetFile != null) {
-        // If chapterIndex was -1, try to find by targetFile again (more robust)
-        int foundIndex = -1;
-        final spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
-        if (spineItems != null) {
-            for (var i = 0; i < spineItems.length; i++) {
-                final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
-                    ?.firstWhere((item) => item.Id == spineItems[i].IdRef, orElse: () => epubx.EpubManifestItem());
-                if (manifestItem?.Href == tocEntry.targetFile) {
-                    foundIndex = i;
-                    break;
-                }
-            }
-        }
-        if (foundIndex != -1) {
-            _displayChapter(foundIndex);
-        } else {
-            ErrorHandler.logWarning("Could not navigate to TOC item by targetFile: ${tocEntry.title}", scope: "ReadingScreen");
-            if(mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("Could not navigate to chapter: ${tocEntry.title}")),
-                );
-            }
-        }
-    } else {
-         ErrorHandler.logWarning("Could not navigate to TOC item (no index/target): ${tocEntry.title}", scope: "ReadingScreen");
-         if(mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text("Could not navigate to chapter: ${tocEntry.title}")),
-            );
-         }
-    }
-  }
-
-  // ... ( _goToNextChapter, _goToPreviousChapter, _saveReadingProgress, _changeFontSize, _showTocDialog, _showReaderSettingsDialog are mostly okay, ensure `mounted` checks before UI calls)
-  // Make sure they also use _getChapterCount() for consistency.
-
-  void _goToNextChapter() {
-    if (_epubBookData == null) return;
-    final int chapterCount = _getChapterCount();
-    if (chapterCount > 0 && _currentChapterIndex < chapterCount - 1) {
-      _displayChapter(_currentChapterIndex + 1);
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('You are at the last chapter.')),
-        );
-      }
-    }
-  }
-
-  void _goToPreviousChapter() {
-    if (_currentChapterIndex > 0) {
-      _displayChapter(_currentChapterIndex - 1);
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('You are at the first chapter.')),
-        );
-      }
-    }
-  }
-
   Future<void> _saveReadingProgress() async {
-    if (!mounted) return;
-    try {
-      Book? bookToUpdate = await _libraryService.getBookById(widget.book.id);
-      if (bookToUpdate == null) {
-        ErrorHandler.logWarning("Book not found for saving progress: ${widget.book.id}", scope: "ReadingScreen");
-        return;
+    if (!_isInitialized) return; // Don't save if not even initialized
+
+    if (widget.book.format == BookFormat.epub) {
+      try {
+        // Fetch the latest version of the book from storage
+        Book? bookToUpdate = await _libraryService.getBookById(widget.book.id);
+        if (bookToUpdate == null) {
+          ErrorHandler.logWarning("Book not found for saving progress: ${widget.book.id}", scope: "ReadingScreen");
+          return;
+        }
+
+        bookToUpdate.currentChapterIndex = _epubController.currentChapterIndex;
+        bookToUpdate.lastRead = DateTime.now();
+        // TODO: Update book.readingPercentage and book.lastLocation if those are tracked by controller
+        // bookToUpdate.readingPercentage = _epubController.readingPercentage;
+        // bookToUpdate.lastLocation = _epubController.currentLocationCFI // (example for EPUB)
+
+        await _libraryService.updateBook(bookToUpdate);
+        ErrorHandler.logInfo("Saved progress for ${widget.book.title} (Chapter: ${_epubController.currentChapterIndex})", scope: "ReadingScreen");
+      } catch (e, s) {
+        ErrorHandler.recordError(e, s, reason: "Failed to save reading progress for ${widget.book.title}", scope: "ReadingScreen");
       }
-
-      bookToUpdate.currentChapterIndex = _currentChapterIndex;
-      bookToUpdate.lastRead = DateTime.now();
-      await _libraryService.updateBook(bookToUpdate);
-      ErrorHandler.logInfo("Saved progress for ${widget.book.title}", scope: "ReadingScreen");
-    } catch (e,s) {
-      ErrorHandler.recordError(e,s, reason: "Failed to save reading progress for ${widget.book.title}");
     }
-  }
-
-  void _changeFontSize(double delta) {
-    if(mounted) {
-      setState(() {
-        _currentFontSize = (_currentFontSize + delta).clamp(10.0, 30.0);
-      });
-    }
+    // Add progress saving for other formats here
   }
 
   void _showTocDialog() {
-    if (_tocList.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Table of Contents not available or empty.')),
-        );
-      }
+    if (widget.book.format != BookFormat.epub || !_isInitialized || _epubController.tableOfContents.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Table of Contents not available or empty.')),
+      );
       return;
     }
+
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
+      isScrollControlled: true, // Allows for taller bottom sheets
       builder: (BuildContext context) {
         return DraggableScrollableSheet(
           expand: false,
-          initialChildSize: 0.7,
-          maxChildSize: 0.9,
+          initialChildSize: 0.7, // Start at 70% of screen height
+          maxChildSize: 0.9,     // Max at 90%
           builder: (_, scrollController) {
             return ListView.builder(
               controller: scrollController,
-              itemCount: _tocList.length,
+              itemCount: _epubController.tableOfContents.length,
               itemBuilder: (context, index) {
-                final tocEntry = _tocList[index];
+                final TocEntry tocEntry = _epubController.tableOfContents[index];
                 return ListTile(
-                  contentPadding: EdgeInsets.only(left: (tocEntry.depth * 16.0) + 16.0),
-                  title: Text(tocEntry.title), // tocEntry.title comes from EpubNavigationPoint.Label or EpubChapter.Title
-                  onTap: () => _goToChapterByTocEntry(tocEntry),
+                  contentPadding: EdgeInsets.only(left: (tocEntry.depth * kSmallPadding) + kDefaultPadding, right: kDefaultPadding),
+                  title: Text(tocEntry.title, style: TextStyle(
+                    fontWeight: _epubController.currentChapterIndex == tocEntry.chapterIndexForDisplayLogic && tocEntry.chapterIndexForDisplayLogic != -1
+                        ? FontWeight.bold // Highlight current chapter if index matches
+                        : FontWeight.normal,
+                  )),
+                  onTap: () {
+                    Navigator.of(context).pop(); // Close the bottom sheet
+                    _epubController.navigateToTocEntry(tocEntry).then((_) {
+                      if (_scrollController.hasClients) _scrollController.jumpTo(0);
+                    });
+                  },
                 );
               },
             );
-          }
+          },
         );
       },
     );
   }
 
- void _showReaderSettingsDialog() {
+  void _showReaderSettingsDialog() {
+    if (widget.book.format != BookFormat.epub || !_isInitialized) return;
+
     showModalBottomSheet(
       context: context,
       builder: (BuildContext context) {
-        return Padding(
-          padding: const EdgeInsets.all(kDefaultPadding),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text("Font Size", style: Theme.of(context).textTheme.titleMedium),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(icon: const Icon(Icons.remove), onPressed: () => _changeFontSize(-2)),
-                  Text(_currentFontSize.toStringAsFixed(0), style: const TextStyle(fontSize: 18)),
-                  IconButton(icon: const Icon(Icons.add), onPressed: () => _changeFontSize(2)),
+        // Use a StatefulBuilder to manage local state of the font size slider/buttons
+        // without needing to call setState on the whole ReadingScreen or EpubController for intermediate changes.
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setModalState) {
+            return Padding(
+              padding: const EdgeInsets.all(kDefaultPadding),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text("Font Size", style: Theme.of(context).textTheme.titleMedium),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.remove_circle_outline),
+                        onPressed: () {
+                          double newSize = _epubController.currentFontSize - 2;
+                          _epubController.setFontSize(newSize);
+                          // setModalState(() {}); // Update modal state if displaying size here
+                        },
+                      ),
+                      Text(
+                        _epubController.currentFontSize.toStringAsFixed(0),
+                        style: Theme.of(context).textTheme.titleMedium
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add_circle_outline),
+                        onPressed: () {
+                          double newSize = _epubController.currentFontSize + 2;
+                          _epubController.setFontSize(newSize);
+                          // setModalState(() {}); // Update modal state
+                        },
+                      ),
+                    ],
+                  ),
+                  // TODO: Add more settings like font family, themes, line spacing later
+                  const SizedBox(height: kSmallPadding),
+                  // Example for future themes:
+                  // Text("Theme", style: Theme.of(context).textTheme.titleMedium),
+                  // SegmentedButton(...)
+                  const SizedBox(height: kDefaultPadding),
                 ],
               ),
-            ],
-          ),
+            );
+          }
         );
       },
     );
@@ -1457,115 +1769,101 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    String appBarTitle = _isLoading ? "Loading..." : (_epubBookData?.Title ?? widget.book.title);
-    if (_loadingError != null) appBarTitle = "Error";
+    String appBarTitle = widget.book.title; // Default title
+    if (_isInitialized && widget.book.format == BookFormat.epub) {
+      appBarTitle = _epubController.bookTitleFromEpub ?? widget.book.title;
+      if (_epubController.isLoading && _epubController.currentChapterHtmlContent == null) {
+         // Use book title if controller still loading metadata
+      } else if (_epubController.loadingError != null) {
+        appBarTitle = "Error Loading Book";
+      }
+    } else if (!_isInitialized && widget.book.format == BookFormat.epub) {
+        appBarTitle = "Loading...";
+    }
+
 
     return PopScope(
       canPop: true,
-      onPopInvokedWithResult: (bool didPop, dynamic result) async { // Corrected signature if needed
-        if (didPop && mounted) {
+      onPopInvokedWithResult: (bool didPop, dynamic result) async {
+        if (didPop) {
           await _saveReadingProgress();
         }
       },
-      // Fallback for older Flutter versions, or if onPopInvokedWithResult isn't the one
-      // onPopInvoked: (bool didPop) async { 
-      //   if (didPop && mounted) {
-      //     await _saveReadingProgress();
-      //   }
-      // },
       child: Scaffold(
         appBar: AppBar(
           title: Text(appBarTitle, overflow: TextOverflow.ellipsis),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.list_alt),
-              onPressed: (_isLoading || _epubBookData == null) ? null : _showTocDialog,
-              tooltip: 'Table of Contents',
-            ),
-            IconButton(
-              icon: const Icon(Icons.tune),
-              onPressed: _isLoading ? null : _showReaderSettingsDialog,
-              tooltip: 'Reader Settings',
-            ),
-            IconButton(
-              icon: const Icon(Icons.arrow_back_ios),
-              onPressed: _isLoading ? null : _goToPreviousChapter,
-              tooltip: 'Previous Chapter',
-            ),
-            IconButton(
-              icon: const Icon(Icons.arrow_forward_ios),
-              onPressed: _isLoading ? null : _goToNextChapter,
-              tooltip: 'Next Chapter',
-            ),
-          ],
+          actions: _buildAppBarActions(),
         ),
-        body: _buildBody(),
+        body: _buildReaderBody(),
       ),
     );
   }
 
-  Widget _buildBody() {
-    // ... (Same as before, ensure mounted checks for ScaffoldMessenger)
-    if (_isLoading) {
+  List<Widget> _buildAppBarActions() {
+    if (!_isInitialized || widget.book.format != BookFormat.epub) {
+      return [
+         if (_isInitialized && widget.book.format == BookFormat.epub && _epubController.isLoading)
+          const Padding(
+            padding: EdgeInsets.all(kDefaultPadding),
+            child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2,)),
+          )
+      ]; // Empty or minimal actions if not EPUB or not ready
+    }
+
+    // EPUB specific actions
+    return [
+      IconButton(
+        icon: const Icon(Icons.list_alt),
+        onPressed: _showTocDialog,
+        tooltip: 'Table of Contents',
+      ),
+      IconButton(
+        icon: const Icon(Icons.tune),
+        onPressed: _showReaderSettingsDialog,
+        tooltip: 'Reader Settings',
+      ),
+      IconButton(
+        icon: const Icon(Icons.arrow_back_ios_new), // Using a more standard icon
+        onPressed: () => _epubController.previousChapter().then((_) {
+          if (_scrollController.hasClients) _scrollController.jumpTo(0);
+        }),
+        tooltip: 'Previous Chapter',
+      ),
+      IconButton(
+        icon: const Icon(Icons.arrow_forward_ios),
+        onPressed: () => _epubController.nextChapter().then((_) {
+          if (_scrollController.hasClients) _scrollController.jumpTo(0);
+        }),
+        tooltip: 'Next Chapter',
+      ),
+    ];
+  }
+
+  Widget _buildReaderBody() {
+    if (!_isInitialized && widget.book.format == BookFormat.epub) {
+      // Show a loading indicator while the EpubController is initializing
       return const Center(child: CircularProgressIndicator());
     }
-    if (_loadingError != null) {
+    
+    if (widget.book.format == BookFormat.epub) {
+        // EpubController's isLoading or loadingError will be handled by EpubViewerWidget
+        return EpubViewerWidget(
+            controller: _epubController,
+            scrollController: _scrollController, // Pass the scroll controller
+        );
+    } else {
+      // Placeholder for other formats or error message
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(kDefaultPadding),
-          child: Text(_loadingError!, style: const TextStyle(color: Colors.red)),
+          child: Text(
+            "Unsupported book format: ${widget.book.format.toString()}.\nCannot display this book.",
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.orange),
+          ),
         ),
       );
     }
-    if (_currentChapterContent == null) {
-      return const Center(child: Text("No content to display for this chapter."));
-    }
-
-    return SingleChildScrollView(
-      controller: _scrollController,
-      padding: const EdgeInsets.all(kDefaultPadding),
-      child: Html(
-        data: _currentChapterContent!,
-        style: {
-          "body": Style(
-            fontSize: FontSize(_currentFontSize),
-            lineHeight: LineHeight.em(1.5),
-          ),
-          "p": Style(margin: Margins.only(bottom: _currentFontSize * 0.5)),
-          "h1": Style(fontSize: FontSize(_currentFontSize * 1.8), fontWeight: FontWeight.bold),
-          "h2": Style(fontSize: FontSize(_currentFontSize * 1.5), fontWeight: FontWeight.bold),
-          "h3": Style(fontSize: FontSize(_currentFontSize * 1.3), fontWeight: FontWeight.bold),
-        },
-        onLinkTap: (url, attributes, element) async {
-          ErrorHandler.logInfo("Link tapped: $url", scope: "ReadingScreen");
-          if (url != null) {
-            if (url.startsWith("http://") || url.startsWith("https://")) {
-              final uri = Uri.parse(url);
-              try {
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                } else {
-                  throw 'Could not launch $url';
-                }
-              } catch(e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Could not launch $url: $e')),
-                  );
-                }
-              }
-            } else {
-              ErrorHandler.logInfo("Internal link: $url (not yet handled)", scope: "ReadingScreen");
-                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Internal link navigation not yet implemented: $url')),
-                  );
-                }
-            }
-          }
-        },
-      ),
-    );
   }
 }
 ```

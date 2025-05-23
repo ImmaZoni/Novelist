@@ -53,6 +53,9 @@ class Book extends HiveObject { // Extend HiveObject for easier management
   @HiveField(9)
   String? lastLocation; // e.g., EPUB CFI, PDF page number
 
+  @HiveField(10)
+  int? currentChapterIndex; // Index of the current chapter in the book
+
   // --- Other potential fields ---
   // @HiveField(10)
   // List<String> collectionIds; // IDs of collections this book belongs to
@@ -74,6 +77,7 @@ class Book extends HiveObject { // Extend HiveObject for easier management
     this.lastRead,
     this.readingPercentage = 0.0,
     this.lastLocation,
+    this.currentChapterIndex
   })  : id = id ?? const Uuid().v4(),
         dateAdded = dateAdded ?? DateTime.now();
 

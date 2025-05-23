@@ -27,13 +27,14 @@ class BookAdapter extends TypeAdapter<Book> {
       lastRead: fields[7] as DateTime?,
       readingPercentage: fields[8] as double,
       lastLocation: fields[9] as String?,
+      currentChapterIndex: fields[10] as int?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Book obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -53,7 +54,9 @@ class BookAdapter extends TypeAdapter<Book> {
       ..writeByte(8)
       ..write(obj.readingPercentage)
       ..writeByte(9)
-      ..write(obj.lastLocation);
+      ..write(obj.lastLocation)
+      ..writeByte(10)
+      ..write(obj.currentChapterIndex);
   }
 
   @override

@@ -10,6 +10,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p; // Already in pubspec from utils.dart
 import 'package:novelist/core/utils.dart'; // For getFileExtension
 import 'package:permission_handler/permission_handler.dart'; // For permissions
+import 'package:novelist/core/error_handler.dart';
+import 'package:novelist/services/metadata_service.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -114,24 +116,22 @@ Future<void> _importBook() async {
           break;
       }
 
-      // 4. TODO: Extract metadata (title, author) using a parser for EPUB, etc.
-      // For now, use filename as title.
-      String titleFromFile = p.basenameWithoutExtension(newFilePath);
-      String? authorFromFile; // Placeholder
-
       // Example of calling a (yet to be created) metadata service
-      // Map<String, String?> metadata = await MetadataService.extractMetadata(newFilePath, format);
-      // titleFromFile = metadata['title'] ?? titleFromFile;
-      // authorFromFile = metadata['author'];
+      Map<String, String?> extractedMeta = await MetadataService.extractMetadata(newFilePath, format);
+
+      String titleFromFile = extractedMeta['title'] ?? p.basenameWithoutExtension(newFilePath);
+      String? authorFromFile = extractedMeta['author'];
+      String? coverPathFromFile = extractedMeta['coverPath']; // You'll need to implement cover saving in MetadataService for this
 
       final newBook = Book(
         title: titleFromFile,
-        author: authorFromFile, // Will be null for now
-        filePath: newFilePath, // IMPORTANT: Use the new path in app storage
+        author: authorFromFile,
+        filePath: newFilePath,
         format: format,
+        coverImagePath: coverPathFromFile, // Populate this
       );
 
-      await _libraryService.addBook(newBook);
+await _libraryService.addBook(newBook);
       _refreshLibrary();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Imported: ${newBook.title}')),
@@ -225,7 +225,7 @@ Future<void> _importBook() async {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
             // You can use your ErrorHandler here
-            // ErrorHandler.recordError(snapshot.error, snapshot.stackTrace, reason: "Failed to load library");
+            ErrorHandler.recordError(snapshot.error, snapshot.stackTrace, reason: "Failed to load library");
             return Center(child: Text('Error loading library: ${snapshot.error}'));
           } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
             return Center(
@@ -255,7 +255,18 @@ Future<void> _importBook() async {
             itemBuilder: (context, index) {
               final book = books[index];
               return ListTile(
-                leading: const Icon(Icons.book_online_outlined), // Placeholder for cover
+                leading: book.coverImagePath != null && book.coverImagePath!.isNotEmpty
+                ? Image.file(
+                    File(book.coverImagePath!),
+                    width: 50, // Adjust size as needed
+                    height: 70,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      // Fallback icon if image fails to load
+                      return const Icon(Icons.book_online_outlined, size: 40);
+                    },
+                  )
+                : const Icon(Icons.book_online_outlined, size: 40), // Fallback if no cover
                 title: Text(book.title),
                 subtitle: Text(book.author ?? "Unknown Author"),
                 trailing: IconButton(

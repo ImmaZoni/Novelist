@@ -26,7 +26,6 @@ analysis_options.yaml
 --- settings_screen.dart
 /linux
 /macos
-pubspec.lock
 pubspec.yaml
 /test
 /web
@@ -422,6 +421,9 @@ class Book extends HiveObject { // Extend HiveObject for easier management
   @HiveField(9)
   String? lastLocation; // e.g., EPUB CFI, PDF page number
 
+  @HiveField(10)
+  int? currentChapterIndex; // Index of the current chapter in the book
+
   // --- Other potential fields ---
   // @HiveField(10)
   // List<String> collectionIds; // IDs of collections this book belongs to
@@ -443,6 +445,7 @@ class Book extends HiveObject { // Extend HiveObject for easier management
     this.lastRead,
     this.readingPercentage = 0.0,
     this.lastLocation,
+    this.currentChapterIndex
   })  : id = id ?? const Uuid().v4(),
         dateAdded = dateAdded ?? DateTime.now();
 
@@ -492,13 +495,14 @@ class BookAdapter extends TypeAdapter<Book> {
       lastRead: fields[7] as DateTime?,
       readingPercentage: fields[8] as double,
       lastLocation: fields[9] as String?,
+      currentChapterIndex: fields[10] as int?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Book obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -518,7 +522,9 @@ class BookAdapter extends TypeAdapter<Book> {
       ..writeByte(8)
       ..write(obj.readingPercentage)
       ..writeByte(9)
-      ..write(obj.lastLocation);
+      ..write(obj.lastLocation)
+      ..writeByte(10)
+      ..write(obj.currentChapterIndex);
   }
 
   @override
@@ -597,9 +603,11 @@ class BookFormatAdapter extends TypeAdapter<BookFormat> {
 
 ```dart
 // lib/services/library_service.dart
+import "dart:io";
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:novelist/core/app_constants.dart'; // For kLibraryBox
 import 'package:novelist/models/book.dart';
+import 'package:novelist/core/error_handler.dart';
 
 class LibraryService {
   late Box<Book> _libraryBox;
@@ -681,8 +689,11 @@ class LibraryService {
 
 ```dart
 // lib/services/metadata_service.dart
-import 'package:epubx/epubx.dart'; // Or epubx
-import 'package:novelist/models/book.dart'; // For BookFormat
+import 'dart:io'; // Import for File operations
+import 'dart:typed_data'; // Import for Uint8List
+import 'package:epubx/epubx.dart'; // Or your chosen epub parsing package
+import 'package:novelist/models/book.dart';
+import 'package:novelist/core/error_handler.dart';
 
 class MetadataService {
   static Future<Map<String, String?>> extractMetadata(String filePath, BookFormat format) async {
@@ -690,28 +701,52 @@ class MetadataService {
 
     if (format == BookFormat.epub) {
       try {
-        // Note: epubx reads the file directly.
-        EpubBook epubBook = await EpubReader.readBook(filePath); // epubx specific
+        // 1. Read the file bytes
+        File epubFile = File(filePath);
+        if (!await epubFile.exists()) {
+          ErrorHandler.logWarning("EPUB file not found at path: $filePath", scope: "MetadataService");
+          return metadata; // Return empty metadata if file doesn't exist
+        }
+        Uint8List bytes = await epubFile.readAsBytes();
+
+        // 2. Pass the bytes to EpubReader
+        EpubBook epubBook = await EpubReader.readBook(bytes); // Pass bytes, not filePath
 
         metadata['title'] = epubBook.Title;
         metadata['author'] = epubBook.Author ?? (epubBook.AuthorList?.isNotEmpty == true ? epubBook.AuthorList!.join(', ') : null);
 
         // TODO: Extract and save cover image if desired
         // if (epubBook.CoverImage != null) {
+        //   Uint8List coverBytes = epubBook.CoverImage!;
         //   // 1. Get app's document directory (use path_provider)
-        //   // 2. Create a 'covers' subdirectory
-        //   // 3. Save epubBook.CoverImage (which is Uint8List) to a file in 'covers'
-        //   // 4. Store the path to this cover image file in metadata['coverPath']
+        //   // final Directory appDocDir = await getApplicationDocumentsDirectory();
+        //   // final String coversDir = p.join(appDocDir.path, 'covers');
+        //   // await Directory(coversDir).create(recursive: true);
+        //   // 2. Create a unique filename for the cover
+        //   // final String coverFileName = '${Uuid().v4()}.png'; // Or determine format from bytes
+        //   // final String coverFilePath = p.join(coversDir, coverFileName);
+        //   // 3. Save coverBytes to coverFilePath
+        //   // await File(coverFilePath).writeAsBytes(coverBytes);
+        //   // 4. Store the coverFilePath in metadata
+        //   // metadata['coverPath'] = coverFilePath;
         // }
 
-      } catch (e) {
-        print("Error parsing EPUB metadata for $filePath: $e");
-        // Fallback to filename if parsing fails
+      } catch (e, s) {
+        ErrorHandler.recordError(e, s, reason: "Error parsing EPUB metadata for $filePath");
+        // Fallback: title might still be derivable from filename if parsing fails completely
+        // For example, you could add:
+        // if (metadata['title'] == null) {
+        //   metadata['title'] = p.basenameWithoutExtension(filePath);
+        // }
       }
     } else if (format == BookFormat.pdf) {
       // TODO: PDF metadata extraction (can be complex, may need a dedicated PDF library)
+      // For now, as a fallback for PDF and others:
+      // metadata['title'] = p.basenameWithoutExtension(filePath);
+    } else {
+      // For other unknown formats, perhaps just use filename
+      // metadata['title'] = p.basenameWithoutExtension(filePath);
     }
-    // Add other formats if needed
 
     return metadata;
   }
@@ -733,6 +768,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p; // Already in pubspec from utils.dart
 import 'package:novelist/core/utils.dart'; // For getFileExtension
 import 'package:permission_handler/permission_handler.dart'; // For permissions
+import 'package:novelist/core/error_handler.dart';
+import 'package:novelist/services/metadata_service.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -837,24 +874,22 @@ Future<void> _importBook() async {
           break;
       }
 
-      // 4. TODO: Extract metadata (title, author) using a parser for EPUB, etc.
-      // For now, use filename as title.
-      String titleFromFile = p.basenameWithoutExtension(newFilePath);
-      String? authorFromFile; // Placeholder
-
       // Example of calling a (yet to be created) metadata service
-      // Map<String, String?> metadata = await MetadataService.extractMetadata(newFilePath, format);
-      // titleFromFile = metadata['title'] ?? titleFromFile;
-      // authorFromFile = metadata['author'];
+      Map<String, String?> extractedMeta = await MetadataService.extractMetadata(newFilePath, format);
+
+      String titleFromFile = extractedMeta['title'] ?? p.basenameWithoutExtension(newFilePath);
+      String? authorFromFile = extractedMeta['author'];
+      String? coverPathFromFile = extractedMeta['coverPath']; // You'll need to implement cover saving in MetadataService for this
 
       final newBook = Book(
         title: titleFromFile,
-        author: authorFromFile, // Will be null for now
-        filePath: newFilePath, // IMPORTANT: Use the new path in app storage
+        author: authorFromFile,
+        filePath: newFilePath,
         format: format,
+        coverImagePath: coverPathFromFile, // Populate this
       );
 
-      await _libraryService.addBook(newBook);
+await _libraryService.addBook(newBook);
       _refreshLibrary();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Imported: ${newBook.title}')),
@@ -948,7 +983,7 @@ Future<void> _importBook() async {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
             // You can use your ErrorHandler here
-            // ErrorHandler.recordError(snapshot.error, snapshot.stackTrace, reason: "Failed to load library");
+            ErrorHandler.recordError(snapshot.error, snapshot.stackTrace, reason: "Failed to load library");
             return Center(child: Text('Error loading library: ${snapshot.error}'));
           } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
             return Center(
@@ -978,7 +1013,18 @@ Future<void> _importBook() async {
             itemBuilder: (context, index) {
               final book = books[index];
               return ListTile(
-                leading: const Icon(Icons.book_online_outlined), // Placeholder for cover
+                leading: book.coverImagePath != null && book.coverImagePath!.isNotEmpty
+                ? Image.file(
+                    File(book.coverImagePath!),
+                    width: 50, // Adjust size as needed
+                    height: 70,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      // Fallback icon if image fails to load
+                      return const Icon(Icons.book_online_outlined, size: 40);
+                    },
+                  )
+                : const Icon(Icons.book_online_outlined, size: 40), // Fallback if no cover
                 title: Text(book.title),
                 subtitle: Text(book.author ?? "Unknown Author"),
                 trailing: IconButton(
@@ -1006,39 +1052,518 @@ Future<void> _importBook() async {
 
 ```dart
 // lib/ui/screens/reading_screen.dart
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:novelist/models/book.dart'; // Import your Book model
+import 'package:novelist/models/book.dart';
+import 'package:novelist/core/error_handler.dart';
+import 'package:novelist/services/library_service.dart';
+import 'package:epubx/epubx.dart' as epubx;
+import 'package:flutter_html/flutter_html.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:novelist/core/app_constants.dart';
+// import 'package:path/path.dart' as p; // Remove if not used directly in this file
 
-class ReadingScreen extends StatelessWidget {
+class TocEntry {
+  final String title;
+  final int chapterIndexForDisplayLogic;
+  final int depth;
+  final String? targetFile; // Href of the chapter file
+
+  TocEntry({
+    required this.title,
+    required this.chapterIndexForDisplayLogic,
+    this.depth = 0,
+    this.targetFile,
+  });
+}
+
+class ReadingScreen extends StatefulWidget {
   final Book book;
 
   const ReadingScreen({super.key, required this.book});
 
   @override
+  State<ReadingScreen> createState() => _ReadingScreenState();
+}
+
+class _ReadingScreenState extends State<ReadingScreen> {
+  final LibraryService _libraryService = LibraryService();
+  epubx.EpubBook? _epubBookData;
+  String? _currentChapterContent;
+  bool _isLoading = true;
+  String? _loadingError;
+
+  int _currentChapterIndex = 0;
+  double _currentFontSize = 16.0;
+  final ScrollController _scrollController = ScrollController();
+  List<TocEntry> _tocList = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _currentChapterIndex = widget.book.currentChapterIndex ?? 0;
+    _initialLoadEpub();
+  }
+
+  @override
+  void dispose() {
+    _saveReadingProgress();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initialLoadEpub() async {
+    // ... (same as previous correct version)
+    if (!mounted) return;
+    setState(() {
+      _isLoading = true;
+      _loadingError = null;
+    });
+    try {
+      if (widget.book.format != BookFormat.epub) {
+        throw Exception("Unsupported format: ${widget.book.format}");
+      }
+
+      File bookFile = File(widget.book.filePath);
+      if (!await bookFile.exists()) {
+        throw Exception("Book file not found: ${widget.book.filePath}");
+      }
+      Uint8List bytes = await bookFile.readAsBytes();
+      epubx.EpubBook epub = await epubx.EpubReader.readBook(bytes);
+
+      if (!mounted) return;
+      setState(() {
+        _epubBookData = epub;
+        _buildTocList();
+      });
+
+      int chapterCount = _getChapterCount();
+      if (chapterCount > 0 && _currentChapterIndex >= chapterCount) {
+        _currentChapterIndex = 0;
+      } else if (chapterCount == 0 && _currentChapterIndex != 0) {
+        _currentChapterIndex = 0;
+      }
+      
+      await _displayChapter(_currentChapterIndex, fromInit: true);
+
+    } catch (e, s) {
+      ErrorHandler.recordError(e, s, reason: "Failed to load EPUB for ${widget.book.title}");
+      if (mounted) {
+        setState(() {
+          _loadingError = "Error loading book: $e";
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  int _getChapterCount() {
+    return _epubBookData?.Schema?.Package?.Spine?.Items?.length ?? 
+           _epubBookData?.Chapters?.length ?? 
+           0;
+  }
+
+  Future<void> _displayChapter(int chapterIndex, {bool fromInit = false}) async {
+    // ... (ensure null checks for _epubBookData and its nested properties)
+    if (_epubBookData == null || !mounted) return;
+
+    if (!fromInit) {
+      await _saveReadingProgress();
+    }
+    
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _currentChapterIndex = chapterIndex;
+      });
+    }
+
+    String? chapterHtmlContent;
+    final spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
+
+    if (spineItems != null && spineItems.isNotEmpty) {
+      if (chapterIndex >= 0 && chapterIndex < spineItems.length) {
+        final spineItem = spineItems[chapterIndex];
+        final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
+            ?.firstWhere((item) => item.Id == spineItem.IdRef,
+                orElse: () => epubx.EpubManifestItem()
+            );
+        
+        final String? hrefKey = manifestItem?.Href;
+        if (hrefKey != null && 
+            _epubBookData!.Content?.Html?.containsKey(hrefKey) == true) {
+          chapterHtmlContent = _epubBookData!.Content!.Html![hrefKey]!.Content;
+        }
+      }
+    }
+
+    if (chapterHtmlContent == null) {
+      List<epubx.EpubChapter>? chapters = _epubBookData!.Chapters;
+      if (chapters != null && chapterIndex >= 0 && chapterIndex < chapters.length) {
+        epubx.EpubChapter chapter = chapters[chapterIndex];
+        chapterHtmlContent = chapter.HtmlContent;
+        if (chapterHtmlContent == null && chapter.ContentFileName != null) {
+          final chapterFile = _epubBookData!.Content?.Html?[chapter.ContentFileName!];
+          if (chapterFile != null) {
+            chapterHtmlContent = chapterFile.Content;
+          }
+        }
+      }
+    }
+    
+    if (!mounted) return;
+    if (chapterHtmlContent != null) {
+      setState(() {
+        _currentChapterContent = chapterHtmlContent;
+        _isLoading = false;
+      });
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0.0);
+      }
+    } else {
+      ErrorHandler.logWarning("Could not load content for chapter index $chapterIndex", scope: "ReadingScreen");
+      setState(() {
+        _currentChapterContent = "<p>Error: Could not load chapter content for index $chapterIndex.</p>";
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _buildTocList() {
+    _tocList = [];
+    if (_epubBookData == null) return;
+
+    final nav = _epubBookData!.Schema?.Navigation;
+    final List<epubx.EpubNavigationMap>? navMaps = nav?.NavMap;
+
+    if (navMaps != null && navMaps.isNotEmpty) {
+      // Try to find a navMap with points (usually the first one if it exists)
+      epubx.EpubNavigationMap? mainNavMap;
+      for (var map in navMaps) {
+        if (map.Points.isNotEmpty) {
+          mainNavMap = map;
+          break;
+        }
+      }
+
+      if (mainNavMap != null && mainNavMap.Points.isNotEmpty) {
+         void addNavPoints(List<epubx.EpubNavigationPoint> points, int depth) {
+            for (var point in points) {
+              int spineIndex = _findSpineIndexForNavPoint(point);
+              if (point.Label != null) {
+                 _tocList.add(TocEntry(
+                    title: point.Label!,
+                    chapterIndexForDisplayLogic: spineIndex, // Can be -1 if not directly in spine
+                    depth: depth,
+                    targetFile: point.Content?.Source
+                  ));
+              }
+              if (point.ChildNavigationPoints != null && point.ChildNavigationPoints!.isNotEmpty) { // Null check before isNotEmpty
+                addNavPoints(point.ChildNavigationPoints!, depth + 1);
+              }
+            }
+         }
+        addNavPoints(mainNavMap.Points, 0);
+      }
+    }
+    // Fallback to _epubBookData.Chapters if NavMap is not good or empty
+    if (_tocList.isEmpty && _epubBookData!.Chapters?.isNotEmpty == true) {
+       for (var i = 0; i < _epubBookData!.Chapters!.length; i++) {
+         var chapter = _epubBookData!.Chapters![i];
+         if (chapter.Title != null) {
+            _tocList.add(TocEntry(
+              title: chapter.Title!,
+              chapterIndexForDisplayLogic: i, 
+              depth: 0, 
+              targetFile: chapter.ContentFileName
+            ));
+         }
+       }
+    }
+  }
+
+  int _findSpineIndexForNavPoint(epubx.EpubNavigationPoint navPoint) {
+    final String? targetFile = navPoint.Content?.Source?.split('#').first;
+    if (targetFile == null || _epubBookData?.Schema?.Package?.Spine?.Items == null) return -1;
+
+    final spineItems = _epubBookData!.Schema!.Package!.Spine!.Items!; // Safe after null check
+    for (var i = 0; i < spineItems.length; i++) {
+        final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
+            ?.firstWhere((item) => item.Id == spineItems[i].IdRef, orElse: () => epubx.EpubManifestItem());
+        if (manifestItem?.Href == targetFile) {
+            return i;
+        }
+    }
+    return -1;
+  }
+
+  void _goToChapterByTocEntry(TocEntry tocEntry) {
+    if (mounted) Navigator.of(context).pop();
+    if (_epubBookData == null) return;
+    
+    if (tocEntry.chapterIndexForDisplayLogic != -1) {
+        _displayChapter(tocEntry.chapterIndexForDisplayLogic);
+    } else if (tocEntry.targetFile != null) {
+        // If chapterIndex was -1, try to find by targetFile again (more robust)
+        int foundIndex = -1;
+        final spineItems = _epubBookData!.Schema?.Package?.Spine?.Items;
+        if (spineItems != null) {
+            for (var i = 0; i < spineItems.length; i++) {
+                final manifestItem = _epubBookData!.Schema?.Package?.Manifest?.Items
+                    ?.firstWhere((item) => item.Id == spineItems[i].IdRef, orElse: () => epubx.EpubManifestItem());
+                if (manifestItem?.Href == tocEntry.targetFile) {
+                    foundIndex = i;
+                    break;
+                }
+            }
+        }
+        if (foundIndex != -1) {
+            _displayChapter(foundIndex);
+        } else {
+            ErrorHandler.logWarning("Could not navigate to TOC item by targetFile: ${tocEntry.title}", scope: "ReadingScreen");
+            if(mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Could not navigate to chapter: ${tocEntry.title}")),
+                );
+            }
+        }
+    } else {
+         ErrorHandler.logWarning("Could not navigate to TOC item (no index/target): ${tocEntry.title}", scope: "ReadingScreen");
+         if(mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text("Could not navigate to chapter: ${tocEntry.title}")),
+            );
+         }
+    }
+  }
+
+  // ... ( _goToNextChapter, _goToPreviousChapter, _saveReadingProgress, _changeFontSize, _showTocDialog, _showReaderSettingsDialog are mostly okay, ensure `mounted` checks before UI calls)
+  // Make sure they also use _getChapterCount() for consistency.
+
+  void _goToNextChapter() {
+    if (_epubBookData == null) return;
+    final int chapterCount = _getChapterCount();
+    if (chapterCount > 0 && _currentChapterIndex < chapterCount - 1) {
+      _displayChapter(_currentChapterIndex + 1);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You are at the last chapter.')),
+        );
+      }
+    }
+  }
+
+  void _goToPreviousChapter() {
+    if (_currentChapterIndex > 0) {
+      _displayChapter(_currentChapterIndex - 1);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You are at the first chapter.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _saveReadingProgress() async {
+    if (!mounted) return;
+    try {
+      Book? bookToUpdate = await _libraryService.getBookById(widget.book.id);
+      if (bookToUpdate == null) {
+        ErrorHandler.logWarning("Book not found for saving progress: ${widget.book.id}", scope: "ReadingScreen");
+        return;
+      }
+
+      bookToUpdate.currentChapterIndex = _currentChapterIndex;
+      bookToUpdate.lastRead = DateTime.now();
+      await _libraryService.updateBook(bookToUpdate);
+      ErrorHandler.logInfo("Saved progress for ${widget.book.title}", scope: "ReadingScreen");
+    } catch (e,s) {
+      ErrorHandler.recordError(e,s, reason: "Failed to save reading progress for ${widget.book.title}");
+    }
+  }
+
+  void _changeFontSize(double delta) {
+    if(mounted) {
+      setState(() {
+        _currentFontSize = (_currentFontSize + delta).clamp(10.0, 30.0);
+      });
+    }
+  }
+
+  void _showTocDialog() {
+    if (_tocList.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Table of Contents not available or empty.')),
+        );
+      }
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.7,
+          maxChildSize: 0.9,
+          builder: (_, scrollController) {
+            return ListView.builder(
+              controller: scrollController,
+              itemCount: _tocList.length,
+              itemBuilder: (context, index) {
+                final tocEntry = _tocList[index];
+                return ListTile(
+                  contentPadding: EdgeInsets.only(left: (tocEntry.depth * 16.0) + 16.0),
+                  title: Text(tocEntry.title), // tocEntry.title comes from EpubNavigationPoint.Label or EpubChapter.Title
+                  onTap: () => _goToChapterByTocEntry(tocEntry),
+                );
+              },
+            );
+          }
+        );
+      },
+    );
+  }
+
+ void _showReaderSettingsDialog() {
+    showModalBottomSheet(
+      context: context,
+      builder: (BuildContext context) {
+        return Padding(
+          padding: const EdgeInsets.all(kDefaultPadding),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text("Font Size", style: Theme.of(context).textTheme.titleMedium),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(icon: const Icon(Icons.remove), onPressed: () => _changeFontSize(-2)),
+                  Text(_currentFontSize.toStringAsFixed(0), style: const TextStyle(fontSize: 18)),
+                  IconButton(icon: const Icon(Icons.add), onPressed: () => _changeFontSize(2)),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(book.title), // Display book title in AppBar
-      ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              'Reading: ${book.title}',
-              style: Theme.of(context).textTheme.headlineSmall,
+    String appBarTitle = _isLoading ? "Loading..." : (_epubBookData?.Title ?? widget.book.title);
+    if (_loadingError != null) appBarTitle = "Error";
+
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (bool didPop, dynamic result) async { // Corrected signature if needed
+        if (didPop && mounted) {
+          await _saveReadingProgress();
+        }
+      },
+      // Fallback for older Flutter versions, or if onPopInvokedWithResult isn't the one
+      // onPopInvoked: (bool didPop) async { 
+      //   if (didPop && mounted) {
+      //     await _saveReadingProgress();
+      //   }
+      // },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(appBarTitle, overflow: TextOverflow.ellipsis),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.list_alt),
+              onPressed: (_isLoading || _epubBookData == null) ? null : _showTocDialog,
+              tooltip: 'Table of Contents',
             ),
-            const SizedBox(height: 16),
-            Text('Author: ${book.author ?? "N/A"}'),
-            Text('File Path: ${book.filePath}'),
-            Text('Format: ${book.format.toString().split('.').last}'),
-            const SizedBox(height: 32),
-            const Text(
-              '(Content rendering will be here)',
-              style: TextStyle(fontStyle: FontStyle.italic),
+            IconButton(
+              icon: const Icon(Icons.tune),
+              onPressed: _isLoading ? null : _showReaderSettingsDialog,
+              tooltip: 'Reader Settings',
+            ),
+            IconButton(
+              icon: const Icon(Icons.arrow_back_ios),
+              onPressed: _isLoading ? null : _goToPreviousChapter,
+              tooltip: 'Previous Chapter',
+            ),
+            IconButton(
+              icon: const Icon(Icons.arrow_forward_ios),
+              onPressed: _isLoading ? null : _goToNextChapter,
+              tooltip: 'Next Chapter',
             ),
           ],
         ),
+        body: _buildBody(),
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    // ... (Same as before, ensure mounted checks for ScaffoldMessenger)
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_loadingError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(kDefaultPadding),
+          child: Text(_loadingError!, style: const TextStyle(color: Colors.red)),
+        ),
+      );
+    }
+    if (_currentChapterContent == null) {
+      return const Center(child: Text("No content to display for this chapter."));
+    }
+
+    return SingleChildScrollView(
+      controller: _scrollController,
+      padding: const EdgeInsets.all(kDefaultPadding),
+      child: Html(
+        data: _currentChapterContent!,
+        style: {
+          "body": Style(
+            fontSize: FontSize(_currentFontSize),
+            lineHeight: LineHeight.em(1.5),
+          ),
+          "p": Style(margin: Margins.only(bottom: _currentFontSize * 0.5)),
+          "h1": Style(fontSize: FontSize(_currentFontSize * 1.8), fontWeight: FontWeight.bold),
+          "h2": Style(fontSize: FontSize(_currentFontSize * 1.5), fontWeight: FontWeight.bold),
+          "h3": Style(fontSize: FontSize(_currentFontSize * 1.3), fontWeight: FontWeight.bold),
+        },
+        onLinkTap: (url, attributes, element) async {
+          ErrorHandler.logInfo("Link tapped: $url", scope: "ReadingScreen");
+          if (url != null) {
+            if (url.startsWith("http://") || url.startsWith("https://")) {
+              final uri = Uri.parse(url);
+              try {
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                } else {
+                  throw 'Could not launch $url';
+                }
+              } catch(e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not launch $url: $e')),
+                  );
+                }
+              }
+            } else {
+              ErrorHandler.logInfo("Internal link: $url (not yet handled)", scope: "ReadingScreen");
+                 if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Internal link navigation not yet implemented: $url')),
+                  );
+                }
+            }
+          }
+        },
       ),
     );
   }
@@ -1069,718 +1594,6 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 }
-```
-
-## pubspec.lock
-
-```lock
-# Generated by pub
-# See https://dart.dev/tools/pub/glossary#lockfile
-packages:
-  _fe_analyzer_shared:
-    dependency: transitive
-    description:
-      name: _fe_analyzer_shared
-      sha256: "16e298750b6d0af7ce8a3ba7c18c69c3785d11b15ec83f6dcd0ad2a0009b3cab"
-      url: "https://pub.dev"
-    source: hosted
-    version: "76.0.0"
-  _macros:
-    dependency: transitive
-    description: dart
-    source: sdk
-    version: "0.3.3"
-  analyzer:
-    dependency: transitive
-    description:
-      name: analyzer
-      sha256: "1f14db053a8c23e260789e9b0980fa27f2680dd640932cae5e1137cce0e46e1e"
-      url: "https://pub.dev"
-    source: hosted
-    version: "6.11.0"
-  args:
-    dependency: transitive
-    description:
-      name: args
-      sha256: d0481093c50b1da8910eb0bb301626d4d8eb7284aa739614d2b394ee09e3ea04
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.7.0"
-  async:
-    dependency: transitive
-    description:
-      name: async
-      sha256: "758e6d74e971c3e5aceb4110bfd6698efc7f501675bcfe0c775459a8140750eb"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.13.0"
-  boolean_selector:
-    dependency: transitive
-    description:
-      name: boolean_selector
-      sha256: "8aab1771e1243a5063b8b0ff68042d67334e3feab9e95b9490f9a6ebf73b42ea"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.2"
-  build:
-    dependency: transitive
-    description:
-      name: build
-      sha256: cef23f1eda9b57566c81e2133d196f8e3df48f244b317368d65c5943d91148f0
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.4.2"
-  build_config:
-    dependency: transitive
-    description:
-      name: build_config
-      sha256: "4ae2de3e1e67ea270081eaee972e1bd8f027d459f249e0f1186730784c2e7e33"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.2"
-  build_daemon:
-    dependency: transitive
-    description:
-      name: build_daemon
-      sha256: "8e928697a82be082206edb0b9c99c5a4ad6bc31c9e9b8b2f291ae65cd4a25daa"
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.0.4"
-  build_resolvers:
-    dependency: transitive
-    description:
-      name: build_resolvers
-      sha256: b9e4fda21d846e192628e7a4f6deda6888c36b5b69ba02ff291a01fd529140f0
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.4.4"
-  build_runner:
-    dependency: "direct dev"
-    description:
-      name: build_runner
-      sha256: "058fe9dce1de7d69c4b84fada934df3e0153dd000758c4d65964d0166779aa99"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.4.15"
-  build_runner_core:
-    dependency: transitive
-    description:
-      name: build_runner_core
-      sha256: "22e3aa1c80e0ada3722fe5b63fd43d9c8990759d0a2cf489c8c5d7b2bdebc021"
-      url: "https://pub.dev"
-    source: hosted
-    version: "8.0.0"
-  built_collection:
-    dependency: transitive
-    description:
-      name: built_collection
-      sha256: "376e3dd27b51ea877c28d525560790aee2e6fbb5f20e2f85d5081027d94e2100"
-      url: "https://pub.dev"
-    source: hosted
-    version: "5.1.1"
-  built_value:
-    dependency: transitive
-    description:
-      name: built_value
-      sha256: ea90e81dc4a25a043d9bee692d20ed6d1c4a1662a28c03a96417446c093ed6b4
-      url: "https://pub.dev"
-    source: hosted
-    version: "8.9.5"
-  characters:
-    dependency: transitive
-    description:
-      name: characters
-      sha256: f71061c654a3380576a52b451dd5532377954cf9dbd272a78fc8479606670803
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.0"
-  checked_yaml:
-    dependency: transitive
-    description:
-      name: checked_yaml
-      sha256: feb6bed21949061731a7a75fc5d2aa727cf160b91af9a3e464c5e3a32e28b5ff
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.0.3"
-  clock:
-    dependency: transitive
-    description:
-      name: clock
-      sha256: fddb70d9b5277016c77a80201021d40a2247104d9f4aa7bab7157b7e3f05b84b
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.2"
-  code_builder:
-    dependency: transitive
-    description:
-      name: code_builder
-      sha256: "0ec10bf4a89e4c613960bf1e8b42c64127021740fb21640c29c909826a5eea3e"
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.10.1"
-  collection:
-    dependency: transitive
-    description:
-      name: collection
-      sha256: "2f5709ae4d3d59dd8f7cd309b4e023046b57d8a6c82130785d2b0e5868084e76"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.19.1"
-  convert:
-    dependency: transitive
-    description:
-      name: convert
-      sha256: b30acd5944035672bc15c6b7a8b47d773e41e2f17de064350988c5d02adb1c68
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.2"
-  crypto:
-    dependency: transitive
-    description:
-      name: crypto
-      sha256: "1e445881f28f22d6140f181e07737b22f1e099a5e1ff94b0af2f9e4a463f4855"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.0.6"
-  cupertino_icons:
-    dependency: "direct main"
-    description:
-      name: cupertino_icons
-      sha256: ba631d1c7f7bef6b729a622b7b752645a2d076dba9976925b8f25725a30e1ee6
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.8"
-  dart_style:
-    dependency: transitive
-    description:
-      name: dart_style
-      sha256: "7306ab8a2359a48d22310ad823521d723acfed60ee1f7e37388e8986853b6820"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.3.8"
-  fake_async:
-    dependency: transitive
-    description:
-      name: fake_async
-      sha256: "5368f224a74523e8d2e7399ea1638b37aecfca824a3cc4dfdf77bf1fa905ac44"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.3.3"
-  ffi:
-    dependency: transitive
-    description:
-      name: ffi
-      sha256: "289279317b4b16eb2bb7e271abccd4bf84ec9bdcbe999e278a94b804f5630418"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.4"
-  file:
-    dependency: transitive
-    description:
-      name: file
-      sha256: a3b4f84adafef897088c160faf7dfffb7696046cb13ae90b508c2cbc95d3b8d4
-      url: "https://pub.dev"
-    source: hosted
-    version: "7.0.1"
-  fixnum:
-    dependency: transitive
-    description:
-      name: fixnum
-      sha256: b6dc7065e46c974bc7c5f143080a6764ec7a4be6da1285ececdc37be96de53be
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.1"
-  flutter:
-    dependency: "direct main"
-    description: flutter
-    source: sdk
-    version: "0.0.0"
-  flutter_lints:
-    dependency: "direct dev"
-    description:
-      name: flutter_lints
-      sha256: "5398f14efa795ffb7a33e9b6a08798b26a180edac4ad7db3f231e40f82ce11e1"
-      url: "https://pub.dev"
-    source: hosted
-    version: "5.0.0"
-  flutter_test:
-    dependency: "direct dev"
-    description: flutter
-    source: sdk
-    version: "0.0.0"
-  frontend_server_client:
-    dependency: transitive
-    description:
-      name: frontend_server_client
-      sha256: f64a0333a82f30b0cca061bc3d143813a486dc086b574bfb233b7c1372427694
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.0.0"
-  glob:
-    dependency: transitive
-    description:
-      name: glob
-      sha256: c3f1ee72c96f8f78935e18aa8cecced9ab132419e8625dc187e1c2408efc20de
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.3"
-  graphs:
-    dependency: transitive
-    description:
-      name: graphs
-      sha256: "741bbf84165310a68ff28fe9e727332eef1407342fca52759cb21ad8177bb8d0"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.3.2"
-  hive:
-    dependency: "direct main"
-    description:
-      name: hive
-      sha256: "8dcf6db979d7933da8217edcec84e9df1bdb4e4edc7fc77dbd5aa74356d6d941"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.3"
-  hive_flutter:
-    dependency: "direct main"
-    description:
-      name: hive_flutter
-      sha256: dca1da446b1d808a51689fb5d0c6c9510c0a2ba01e22805d492c73b68e33eecc
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.0"
-  hive_generator:
-    dependency: "direct dev"
-    description:
-      name: hive_generator
-      sha256: "06cb8f58ace74de61f63500564931f9505368f45f98958bd7a6c35ba24159db4"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.0.1"
-  http:
-    dependency: transitive
-    description:
-      name: http
-      sha256: "2c11f3f94c687ee9bad77c171151672986360b2b001d109814ee7140b2cf261b"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.0"
-  http_multi_server:
-    dependency: transitive
-    description:
-      name: http_multi_server
-      sha256: aa6199f908078bb1c5efb8d8638d4ae191aac11b311132c3ef48ce352fb52ef8
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.2.2"
-  http_parser:
-    dependency: transitive
-    description:
-      name: http_parser
-      sha256: "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571"
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.1.2"
-  io:
-    dependency: transitive
-    description:
-      name: io
-      sha256: dfd5a80599cf0165756e3181807ed3e77daf6dd4137caaad72d0b7931597650b
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.5"
-  js:
-    dependency: transitive
-    description:
-      name: js
-      sha256: "53385261521cc4a0c4658fd0ad07a7d14591cf8fc33abbceae306ddb974888dc"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.7.2"
-  json_annotation:
-    dependency: transitive
-    description:
-      name: json_annotation
-      sha256: "1ce844379ca14835a50d2f019a3099f419082cfdd231cd86a142af94dd5c6bb1"
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.9.0"
-  leak_tracker:
-    dependency: transitive
-    description:
-      name: leak_tracker
-      sha256: "6bb818ecbdffe216e81182c2f0714a2e62b593f4a4f13098713ff1685dfb6ab0"
-      url: "https://pub.dev"
-    source: hosted
-    version: "10.0.9"
-  leak_tracker_flutter_testing:
-    dependency: transitive
-    description:
-      name: leak_tracker_flutter_testing
-      sha256: f8b613e7e6a13ec79cfdc0e97638fddb3ab848452eff057653abd3edba760573
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.0.9"
-  leak_tracker_testing:
-    dependency: transitive
-    description:
-      name: leak_tracker_testing
-      sha256: "6ba465d5d76e67ddf503e1161d1f4a6bc42306f9d66ca1e8f079a47290fb06d3"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.0.1"
-  lints:
-    dependency: transitive
-    description:
-      name: lints
-      sha256: c35bb79562d980e9a453fc715854e1ed39e24e7d0297a880ef54e17f9874a9d7
-      url: "https://pub.dev"
-    source: hosted
-    version: "5.1.1"
-  logging:
-    dependency: transitive
-    description:
-      name: logging
-      sha256: c8245ada5f1717ed44271ed1c26b8ce85ca3228fd2ffdb75468ab01979309d61
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.3.0"
-  macros:
-    dependency: transitive
-    description:
-      name: macros
-      sha256: "1d9e801cd66f7ea3663c45fc708450db1fa57f988142c64289142c9b7ee80656"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.1.3-main.0"
-  matcher:
-    dependency: transitive
-    description:
-      name: matcher
-      sha256: dc58c723c3c24bf8d3e2d3ad3f2f9d7bd9cf43ec6feaa64181775e60190153f2
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.12.17"
-  material_color_utilities:
-    dependency: transitive
-    description:
-      name: material_color_utilities
-      sha256: f7142bb1154231d7ea5f96bc7bde4bda2a0945d2806bb11670e30b850d56bdec
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.11.1"
-  meta:
-    dependency: transitive
-    description:
-      name: meta
-      sha256: e3641ec5d63ebf0d9b41bd43201a66e3fc79a65db5f61fc181f04cd27aab950c
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.16.0"
-  mime:
-    dependency: transitive
-    description:
-      name: mime
-      sha256: "41a20518f0cb1256669420fdba0cd90d21561e560ac240f26ef8322e45bb7ed6"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.0.0"
-  package_config:
-    dependency: transitive
-    description:
-      name: package_config
-      sha256: f096c55ebb7deb7e384101542bfba8c52696c1b56fca2eb62827989ef2353bbc
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.0"
-  path:
-    dependency: "direct main"
-    description:
-      name: path
-      sha256: "75cca69d1490965be98c73ceaea117e8a04dd21217b37b292c9ddbec0d955bc5"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.9.1"
-  path_provider:
-    dependency: transitive
-    description:
-      name: path_provider
-      sha256: "50c5dd5b6e1aaf6fb3a78b33f6aa3afca52bf903a8a5298f53101fdaee55bbcd"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.5"
-  path_provider_android:
-    dependency: transitive
-    description:
-      name: path_provider_android
-      sha256: d0d310befe2c8ab9e7f393288ccbb11b60c019c6b5afc21973eeee4dda2b35e9
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.17"
-  path_provider_foundation:
-    dependency: transitive
-    description:
-      name: path_provider_foundation
-      sha256: "4843174df4d288f5e29185bd6e72a6fbdf5a4a4602717eed565497429f179942"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.4.1"
-  path_provider_linux:
-    dependency: transitive
-    description:
-      name: path_provider_linux
-      sha256: f7a1fe3a634fe7734c8d3f2766ad746ae2a2884abe22e241a8b301bf5cac3279
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.1"
-  path_provider_platform_interface:
-    dependency: transitive
-    description:
-      name: path_provider_platform_interface
-      sha256: "88f5779f72ba699763fa3a3b06aa4bf6de76c8e5de842cf6f29e2e06476c2334"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.2"
-  path_provider_windows:
-    dependency: transitive
-    description:
-      name: path_provider_windows
-      sha256: bd6f00dbd873bfb70d0761682da2b3a2c2fccc2b9e84c495821639601d81afe7
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.3.0"
-  platform:
-    dependency: transitive
-    description:
-      name: platform
-      sha256: "5d6b1b0036a5f331ebc77c850ebc8506cbc1e9416c27e59b439f917a902a4984"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.6"
-  plugin_platform_interface:
-    dependency: transitive
-    description:
-      name: plugin_platform_interface
-      sha256: "4820fbfdb9478b1ebae27888254d445073732dae3d6ea81f0b7e06d5dedc3f02"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.8"
-  pool:
-    dependency: transitive
-    description:
-      name: pool
-      sha256: "20fe868b6314b322ea036ba325e6fc0711a22948856475e2c2b6306e8ab39c2a"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.5.1"
-  pub_semver:
-    dependency: transitive
-    description:
-      name: pub_semver
-      sha256: "5bfcf68ca79ef689f8990d1160781b4bad40a3bd5e5218ad4076ddb7f4081585"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.0"
-  pubspec_parse:
-    dependency: transitive
-    description:
-      name: pubspec_parse
-      sha256: "0560ba233314abbed0a48a2956f7f022cce7c3e1e73df540277da7544cad4082"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.5.0"
-  shelf:
-    dependency: transitive
-    description:
-      name: shelf
-      sha256: e7dd780a7ffb623c57850b33f43309312fc863fb6aa3d276a754bb299839ef12
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.2"
-  shelf_web_socket:
-    dependency: transitive
-    description:
-      name: shelf_web_socket
-      sha256: "3632775c8e90d6c9712f883e633716432a27758216dfb61bd86a8321c0580925"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.0.0"
-  sky_engine:
-    dependency: transitive
-    description: flutter
-    source: sdk
-    version: "0.0.0"
-  source_gen:
-    dependency: transitive
-    description:
-      name: source_gen
-      sha256: "14658ba5f669685cd3d63701d01b31ea748310f7ab854e471962670abcf57832"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.5.0"
-  source_helper:
-    dependency: transitive
-    description:
-      name: source_helper
-      sha256: "86d247119aedce8e63f4751bd9626fc9613255935558447569ad42f9f5b48b3c"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.3.5"
-  source_span:
-    dependency: transitive
-    description:
-      name: source_span
-      sha256: "254ee5351d6cb365c859e20ee823c3bb479bf4a293c22d17a9f1bf144ce86f7c"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.10.1"
-  sprintf:
-    dependency: transitive
-    description:
-      name: sprintf
-      sha256: "1fc9ffe69d4df602376b52949af107d8f5703b77cda567c4d7d86a0693120f23"
-      url: "https://pub.dev"
-    source: hosted
-    version: "7.0.0"
-  stack_trace:
-    dependency: transitive
-    description:
-      name: stack_trace
-      sha256: "8b27215b45d22309b5cddda1aa2b19bdfec9df0e765f2de506401c071d38d1b1"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.12.1"
-  stream_channel:
-    dependency: transitive
-    description:
-      name: stream_channel
-      sha256: "969e04c80b8bcdf826f8f16579c7b14d780458bd97f56d107d3950fdbeef059d"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.4"
-  stream_transform:
-    dependency: transitive
-    description:
-      name: stream_transform
-      sha256: ad47125e588cfd37a9a7f86c7d6356dde8dfe89d071d293f80ca9e9273a33871
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.1"
-  string_scanner:
-    dependency: transitive
-    description:
-      name: string_scanner
-      sha256: "921cd31725b72fe181906c6a94d987c78e3b98c2e205b397ea399d4054872b43"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.1"
-  term_glyph:
-    dependency: transitive
-    description:
-      name: term_glyph
-      sha256: "7f554798625ea768a7518313e58f83891c7f5024f88e46e7182a4558850a4b8e"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.2.2"
-  test_api:
-    dependency: transitive
-    description:
-      name: test_api
-      sha256: fb31f383e2ee25fbbfe06b40fe21e1e458d14080e3c67e7ba0acfde4df4e0bbd
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.7.4"
-  timing:
-    dependency: transitive
-    description:
-      name: timing
-      sha256: "62ee18aca144e4a9f29d212f5a4c6a053be252b895ab14b5821996cff4ed90fe"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.2"
-  typed_data:
-    dependency: transitive
-    description:
-      name: typed_data
-      sha256: f9049c039ebfeb4cf7a7104a675823cd72dba8297f264b6637062516699fa006
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.0"
-  uuid:
-    dependency: "direct main"
-    description:
-      name: uuid
-      sha256: a5be9ef6618a7ac1e964353ef476418026db906c4facdedaa299b7a2e71690ff
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.5.1"
-  vector_math:
-    dependency: transitive
-    description:
-      name: vector_math
-      sha256: "80b3257d1492ce4d091729e3a67a60407d227c27241d6927be0130c98e741803"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.4"
-  vm_service:
-    dependency: transitive
-    description:
-      name: vm_service
-      sha256: ddfa8d30d89985b96407efce8acbdd124701f96741f2d981ca860662f1c0dc02
-      url: "https://pub.dev"
-    source: hosted
-    version: "15.0.0"
-  watcher:
-    dependency: transitive
-    description:
-      name: watcher
-      sha256: "69da27e49efa56a15f8afe8f4438c4ec02eff0a117df1b22ea4aad194fe1c104"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.1"
-  web:
-    dependency: transitive
-    description:
-      name: web
-      sha256: "868d88a33d8a87b18ffc05f9f030ba328ffefba92d6c127917a2ba740f9cfe4a"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.1"
-  web_socket:
-    dependency: transitive
-    description:
-      name: web_socket
-      sha256: "34d64019aa8e36bf9842ac014bb5d2f5586ca73df5e4d9bf5c936975cae6982c"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.1"
-  web_socket_channel:
-    dependency: transitive
-    description:
-      name: web_socket_channel
-      sha256: d645757fb0f4773d602444000a8131ff5d48c9e47adfe9772652dd1a4f2d45c8
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.0.3"
-  xdg_directories:
-    dependency: transitive
-    description:
-      name: xdg_directories
-      sha256: "7a3f37b05d989967cdddcbb571f1ea834867ae2faa29725fd085180e0883aa15"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.0"
-  yaml:
-    dependency: transitive
-    description:
-      name: yaml
-      sha256: b9da305ac7c39faa3f030eccd175340f968459dae4af175130b3fc47e40d76ce
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.3"
-sdks:
-  dart: ">=3.8.0 <4.0.0"
-  flutter: ">=3.27.0"
-
 ```
 
 ## pubspec.yaml
@@ -1826,10 +1639,12 @@ dependencies:
   path: ^1.9.0
   hive: ^2.2.3 # Or latest
   hive_flutter: ^1.1.0 # Or latest
-  file_picker: ^6.2.1
+  file_picker: ^10.1.9
   path_provider: ^2.1.3
-  premission_handler: ^11.3.1
-  epubx: ^2.1.0
+  epubx: ^4.0.0
+  permission_handler: ^12.0.0+1
+  flutter_html: ^3.0.0
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:

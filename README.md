@@ -39,10 +39,10 @@ See [Docs/Development/PRD.md](Docs/Development/PRD.md) for the full product requ
 | Platform      | Status             | Notes                                                                 |
 |---------------|--------------------|-----------------------------------------------------------------------|
 | **Android**   | ✅ Tested           | Actively tested and verified.     |
-| **iOS**       | ⚠️ Untested         | Expected to work; testing needed. |
-| **Windows**   | ⚠️ Untested         | Expected to work; testing needed. |
-| **macOS**     | ⚠️ Untested         | Expected to work; testing needed. |
-| **Linux**     | ⚠️ Untested         | Expected to work; testing needed. |
+| **iOS**       | ⚠️ Untested         | May work; testing needed. |
+| **Windows**   | ⚠️ Untested         | May work; testing needed. |
+| **macOS**     | ⚠️ Untested         | May work; testing needed. |
+| **Linux**     | ⚠️ Untested         | May work; testing needed. |
 
 > 💡 **Help Wanted:** If you test Novelist on a platform not yet verified, please open an issue or PR with your findings! Community feedback helps us improve cross-platform support.
 

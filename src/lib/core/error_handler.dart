@@ -2,9 +2,9 @@
 import 'package:flutter/foundation.dart'; // For kDebugMode
 
 class ErrorHandler {
-  static void recordError(dynamic error, StackTrace? stackTrace, {String? reason, bool fatal = false}) {
+  static void recordError(dynamic error, StackTrace? stackTrace, {String? reason, bool fatal = false, String? scope}) { // ADDED scope
     if (kDebugMode) {
-      print('-------------------------------- ERROR --------------------------------');
+      print('-------------------------------- ERROR (${scope ?? 'Global'}) --------------------------------');
       if (reason != null) {
         print('Reason: $reason');
       }
@@ -25,26 +25,17 @@ class ErrorHandler {
     // }
   }
 
-  static void logInfo(String message, {String? scope}) {
+  static void logInfo(String message, {String? scope}) { // scope was already here, ensure consistency
     if (kDebugMode) {
       print('[INFO${scope != null ? ' - $scope' : ''}] $message');
     }
     // TODO: Optionally log to a file or analytics in production
   }
 
-  static void logWarning(String message, {String? scope}) {
+  static void logWarning(String message, {String? scope}) { // scope was already here, ensure consistency
      if (kDebugMode) {
       print('[WARNING${scope != null ? ' - $scope' : ''}] $message');
     }
     // TODO: Optionally log to a file or analytics in production
   }
 }
-
-// Example usage:
-// try {
-//   // ... some operation
-// } catch (e, s) {
-//   ErrorHandler.recordError(e, s, reason: 'Failed to load books');
-// }
-//
-// ErrorHandler.logInfo('User opened library screen.');

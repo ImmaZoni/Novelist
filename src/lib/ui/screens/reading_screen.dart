@@ -6,7 +6,7 @@ import 'package:novelist/core/error_handler.dart';
 import 'package:novelist/core/app_constants.dart';
 import 'package:novelist/core/rendering/epub/epub_controller.dart';
 import 'package:novelist/core/rendering/epub/epub_viewer_widget.dart';
-import 'package:novelist/core/rendering/epub/toc_entry.dart'; // Still needed for TOC dialog
+import 'package:novelist/core/rendering/epub/toc_entry.dart';
 
 class ReadingScreen extends StatefulWidget {
   final Book book;
@@ -18,62 +18,79 @@ class ReadingScreen extends StatefulWidget {
 
 class _ReadingScreenState extends State<ReadingScreen> {
   final LibraryService _libraryService = LibraryService();
-  late final EpubController _epubController; // For EPUBs
-  // Add controllers for other formats later, e.g., PdfController _pdfController;
+  late final EpubController _epubController;
 
-  final ScrollController _scrollController = ScrollController(); // For scrolling content
+  final ScrollController _scrollController = ScrollController();
 
-  bool _isInitialized = false; // To track if controller initialization is done
+  bool _isInitialized = false;
+  bool _readerInitializing = false; // To prevent multiple init calls in didChangeDependencies
 
   @override
   void initState() {
     super.initState();
-
     if (widget.book.format == BookFormat.epub) {
       _epubController = EpubController(book: widget.book);
-      _initializeReader();
+      // Initialization will be triggered by didChangeDependencies
     } else {
-      // Handle unsupported formats or initialize other controllers
-      ErrorHandler.logWarning("Unsupported book format in ReadingScreen: ${widget.book.format}", scope: "ReadingScreen");
-      // Potentially set an error state to display a message
+      // Log error for unsupported formats, _isInitialized will remain false
+      ErrorHandler.logWarning(
+          "Unsupported book format in ReadingScreen: ${widget.book.format}",
+          scope: "ReadingScreen");
     }
   }
 
-  Future<void> _initializeReader() async {
-    if (widget.book.format == BookFormat.epub) {
-      // Listen to controller changes to update UI if needed (e.g., app bar title)
-      _epubController.addListener(_onReaderControllerUpdate);
-      await _epubController.initialize();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Initialize reader here, as MediaQuery is available and we need screen size for pagination
+    if (widget.book.format == BookFormat.epub && !_isInitialized && !_readerInitializing) {
+      _readerInitializing = true; 
+      // Ensure context is available for MediaQuery
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) { // Check if still mounted after the frame
+            final screenSize = MediaQuery.of(context).size;
+            _initializeReader(screenSize).then((_) {
+                if (mounted) {
+                    setState(() { _readerInitializing = false; });
+                }
+            });
+        } else {
+             _readerInitializing = false; // Reset if not mounted
+        }
+      });
     }
-    // Add init for other formats here
+  }
+
+  Future<void> _initializeReader(Size screenSize) async {
+    if (widget.book.format == BookFormat.epub) {
+      _epubController.addListener(_onReaderControllerUpdate);
+      await _epubController.initialize(screenSize); // Pass screenSize
+    }
+    // For other formats, you'd initialize their controllers here
 
     if (mounted) {
       setState(() {
         _isInitialized = true;
       });
-      // Jump to top after initial load if controller manages scrolling,
-      // or ensure EpubViewerWidget does this.
       if (_scrollController.hasClients) {
-         _scrollController.jumpTo(0.0);
+        _scrollController.jumpTo(0.0);
       }
     }
   }
 
   void _onReaderControllerUpdate() {
-    // This is called when notifyListeners() is called in the controller.
-    // Useful if ReadingScreen itself needs to rebuild based on controller state (e.g., app bar title)
     if (mounted) {
       setState(() {
-        // Example: Update AppBar title if it depends on controller.bookTitleFromEpub
+        // Rebuilds ReadingScreen if needed, e.g., for AppBar title or page numbers
       });
     }
   }
 
   @override
   void dispose() {
-    if (widget.book.format == BookFormat.epub) {
+    if (widget.book.format == BookFormat.epub && _isInitialized) { // only if initialized
       _epubController.removeListener(_onReaderControllerUpdate);
-      _saveReadingProgress(); // Save progress before disposing controller
+      _saveReadingProgress(); 
       _epubController.dispose();
     }
     _scrollController.dispose();
@@ -81,30 +98,24 @@ class _ReadingScreenState extends State<ReadingScreen> {
   }
 
   Future<void> _saveReadingProgress() async {
-    if (!_isInitialized) return; // Don't save if not even initialized
+    if (!_isInitialized || widget.book.format != BookFormat.epub) return;
 
-    if (widget.book.format == BookFormat.epub) {
-      try {
-        // Fetch the latest version of the book from storage
-        Book? bookToUpdate = await _libraryService.getBookById(widget.book.id);
-        if (bookToUpdate == null) {
-          ErrorHandler.logWarning("Book not found for saving progress: ${widget.book.id}", scope: "ReadingScreen");
-          return;
-        }
-
-        bookToUpdate.currentChapterIndex = _epubController.currentChapterIndex;
-        bookToUpdate.lastRead = DateTime.now();
-        // TODO: Update book.readingPercentage and book.lastLocation if those are tracked by controller
-        // bookToUpdate.readingPercentage = _epubController.readingPercentage;
-        // bookToUpdate.lastLocation = _epubController.currentLocationCFI // (example for EPUB)
-
-        await _libraryService.updateBook(bookToUpdate);
-        ErrorHandler.logInfo("Saved progress for ${widget.book.title} (Chapter: ${_epubController.currentChapterIndex})", scope: "ReadingScreen");
-      } catch (e, s) {
-        ErrorHandler.recordError(e, s, reason: "Failed to save reading progress for ${widget.book.title}", scope: "ReadingScreen");
+    try {
+      Book? bookToUpdate = await _libraryService.getBookById(widget.book.id);
+      if (bookToUpdate == null) {
+        ErrorHandler.logWarning("Book not found for saving progress: ${widget.book.id}", scope: "ReadingScreen");
+        return;
       }
+      bookToUpdate.currentChapterIndex = _epubController.currentChapterIndex;
+      // TODO: Consider saving _epubController.currentPageInChapterIndex if persistent sub-chapter progress is desired
+      bookToUpdate.lastRead = DateTime.now();
+      await _libraryService.updateBook(bookToUpdate);
+      ErrorHandler.logInfo(
+          "Saved progress for ${widget.book.title} (Chapter: ${_epubController.currentChapterIndex}, Page in Chapter: ${_epubController.currentPageInChapterIndex})",
+          scope: "ReadingScreen");
+    } catch (e, s) {
+      ErrorHandler.recordError(e, s, reason: "Failed to save reading progress for ${widget.book.title}", scope: "ReadingScreen");
     }
-    // Add progress saving for other formats here
   }
 
   void _showTocDialog() {
@@ -117,27 +128,27 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true, // Allows for taller bottom sheets
+      isScrollControlled: true,
       builder: (BuildContext context) {
         return DraggableScrollableSheet(
           expand: false,
-          initialChildSize: 0.7, // Start at 70% of screen height
-          maxChildSize: 0.9,     // Max at 90%
+          initialChildSize: 0.7,
+          maxChildSize: 0.9,
           builder: (_, scrollController) {
             return ListView.builder(
               controller: scrollController,
               itemCount: _epubController.tableOfContents.length,
               itemBuilder: (context, index) {
                 final TocEntry tocEntry = _epubController.tableOfContents[index];
+                bool isCurrentChapter = _epubController.currentChapterIndex == tocEntry.chapterIndexForDisplayLogic && tocEntry.chapterIndexForDisplayLogic != -1;
                 return ListTile(
                   contentPadding: EdgeInsets.only(left: (tocEntry.depth * kSmallPadding) + kDefaultPadding, right: kDefaultPadding),
-                  title: Text(tocEntry.title, style: TextStyle(
-                    fontWeight: _epubController.currentChapterIndex == tocEntry.chapterIndexForDisplayLogic && tocEntry.chapterIndexForDisplayLogic != -1
-                        ? FontWeight.bold // Highlight current chapter if index matches
-                        : FontWeight.normal,
-                  )),
+                  title: Text(
+                    tocEntry.title,
+                    style: TextStyle(fontWeight: isCurrentChapter ? FontWeight.bold : FontWeight.normal),
+                  ),
                   onTap: () {
-                    Navigator.of(context).pop(); // Close the bottom sheet
+                    Navigator.of(context).pop();
                     _epubController.navigateToTocEntry(tocEntry).then((_) {
                       if (_scrollController.hasClients) _scrollController.jumpTo(0);
                     });
@@ -157,8 +168,6 @@ class _ReadingScreenState extends State<ReadingScreen> {
     showModalBottomSheet(
       context: context,
       builder: (BuildContext context) {
-        // Use a StatefulBuilder to manage local state of the font size slider/buttons
-        // without needing to call setState on the whole ReadingScreen or EpubController for intermediate changes.
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setModalState) {
             return Padding(
@@ -174,35 +183,27 @@ class _ReadingScreenState extends State<ReadingScreen> {
                       IconButton(
                         icon: const Icon(Icons.remove_circle_outline),
                         onPressed: () {
-                          double newSize = _epubController.currentFontSize - 2;
-                          _epubController.setFontSize(newSize);
-                          // setModalState(() {}); // Update modal state if displaying size here
+                          _epubController.setFontSize(_epubController.currentFontSize - 2);
+                          // The listener in _EpubViewerWidgetState and _ReadingScreenState will trigger UI updates.
                         },
                       ),
                       Text(
                         _epubController.currentFontSize.toStringAsFixed(0),
-                        style: Theme.of(context).textTheme.titleMedium
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
                       IconButton(
                         icon: const Icon(Icons.add_circle_outline),
                         onPressed: () {
-                          double newSize = _epubController.currentFontSize + 2;
-                          _epubController.setFontSize(newSize);
-                          // setModalState(() {}); // Update modal state
+                           _epubController.setFontSize(_epubController.currentFontSize + 2);
                         },
                       ),
                     ],
                   ),
-                  // TODO: Add more settings like font family, themes, line spacing later
-                  const SizedBox(height: kSmallPadding),
-                  // Example for future themes:
-                  // Text("Theme", style: Theme.of(context).textTheme.titleMedium),
-                  // SegmentedButton(...)
                   const SizedBox(height: kDefaultPadding),
                 ],
               ),
             );
-          }
+          },
         );
       },
     );
@@ -210,15 +211,17 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    String appBarTitle = widget.book.title; // Default title
+    String appBarTitle = widget.book.title;
+    String pageInfo = "";
+
     if (_isInitialized && widget.book.format == BookFormat.epub) {
       appBarTitle = _epubController.bookTitleFromEpub ?? widget.book.title;
-      if (_epubController.isLoading && _epubController.currentChapterHtmlContent == null) {
-         // Use book title if controller still loading metadata
-      } else if (_epubController.loadingError != null) {
+      if (_epubController.loadingError != null) {
         appBarTitle = "Error Loading Book";
+      } else if (!_epubController.isLoading) {
+         pageInfo = " (Page ${_epubController.currentPageInChapterIndex + 1} of ${_epubController.totalPagesInCurrentChapter})";
       }
-    } else if (!_isInitialized && widget.book.format == BookFormat.epub) {
+    } else if (widget.book.format == BookFormat.epub && _readerInitializing) { // Show loading if reader is init
         appBarTitle = "Loading...";
     }
 
@@ -232,7 +235,15 @@ class _ReadingScreenState extends State<ReadingScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(appBarTitle, overflow: TextOverflow.ellipsis),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(appBarTitle, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16)),
+              if (_isInitialized && widget.book.format == BookFormat.epub && !_epubController.isLoading && pageInfo.isNotEmpty)
+                Text(pageInfo, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.normal)),
+            ],
+          ),
           actions: _buildAppBarActions(),
         ),
         body: _buildReaderBody(),
@@ -241,17 +252,14 @@ class _ReadingScreenState extends State<ReadingScreen> {
   }
 
   List<Widget> _buildAppBarActions() {
-    if (!_isInitialized || widget.book.format != BookFormat.epub) {
-      return [
-         if (_isInitialized && widget.book.format == BookFormat.epub && _epubController.isLoading)
-          const Padding(
-            padding: EdgeInsets.all(kDefaultPadding),
-            child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2,)),
-          )
-      ]; // Empty or minimal actions if not EPUB or not ready
+    if (widget.book.format != BookFormat.epub || !_isInitialized) {
+      // Show a loading indicator in actions if initializing
+      if (widget.book.format == BookFormat.epub && _readerInitializing) {
+        return [const Padding(padding: EdgeInsets.all(16.0), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))];
+      }
+      return []; 
     }
 
-    // EPUB specific actions
     return [
       IconButton(
         icon: const Icon(Icons.list_alt),
@@ -264,46 +272,38 @@ class _ReadingScreenState extends State<ReadingScreen> {
         tooltip: 'Reader Settings',
       ),
       IconButton(
-        icon: const Icon(Icons.arrow_back_ios_new), // Using a more standard icon
-        onPressed: () => _epubController.previousChapter().then((_) {
+        icon: const Icon(Icons.arrow_back_ios_new),
+        onPressed: () => _epubController.previousPage().then((_) {
           if (_scrollController.hasClients) _scrollController.jumpTo(0);
         }),
-        tooltip: 'Previous Chapter',
+        tooltip: 'Previous Page',
       ),
       IconButton(
         icon: const Icon(Icons.arrow_forward_ios),
-        onPressed: () => _epubController.nextChapter().then((_) {
+        onPressed: () => _epubController.nextPage().then((_) {
           if (_scrollController.hasClients) _scrollController.jumpTo(0);
         }),
-        tooltip: 'Next Chapter',
+        tooltip: 'Next Page',
       ),
     ];
   }
 
   Widget _buildReaderBody() {
-    if (!_isInitialized && widget.book.format == BookFormat.epub) {
-      // Show a loading indicator while the EpubController is initializing
+    if (widget.book.format != BookFormat.epub) {
+      return Center( /* ... unsupported format message ... */ );
+    }
+    
+    // If not yet initialized and it's an EPUB, show loading.
+    // _readerInitializing handles the very first loading phase.
+    // _isInitialized handles subsequent states.
+    if (!_isInitialized) {
       return const Center(child: CircularProgressIndicator());
     }
     
-    if (widget.book.format == BookFormat.epub) {
-        // EpubController's isLoading or loadingError will be handled by EpubViewerWidget
-        return EpubViewerWidget(
-            controller: _epubController,
-            scrollController: _scrollController, // Pass the scroll controller
-        );
-    } else {
-      // Placeholder for other formats or error message
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(kDefaultPadding),
-          child: Text(
-            "Unsupported book format: ${widget.book.format.toString()}.\nCannot display this book.",
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.orange),
-          ),
-        ),
-      );
-    }
+    // Once initialized, EpubViewerWidget handles its own internal loading/error based on controller state.
+    return EpubViewerWidget(
+        controller: _epubController,
+        scrollController: _scrollController,
+    );
   }
 }

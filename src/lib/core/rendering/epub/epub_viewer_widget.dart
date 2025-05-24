@@ -56,7 +56,8 @@ class _EpubViewerWidgetState extends State<EpubViewerWidget> {
   Widget build(BuildContext context) {
     final controller = widget.controller; // Convenience
 
-    if (controller.isLoading && controller.currentChapterHtmlContent == null) {
+    // Use currentVisiblePageContent instead of currentChapterHtmlContent
+    if (controller.isLoading && controller.currentVisiblePageContent == null) {
       // Show loading indicator only if content isn't already available (e.g., initial load)
       return const Center(child: CircularProgressIndicator());
     }
@@ -74,35 +75,31 @@ class _EpubViewerWidgetState extends State<EpubViewerWidget> {
       );
     }
 
-    if (controller.currentChapterHtmlContent == null) {
+    // Check currentVisiblePageContent
+    if (controller.currentVisiblePageContent == null) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(kDefaultPadding),
-          child: Text("No content available for this chapter."),
+          child: Text("No content to display for this page."), // Updated message
         ),
       );
     }
 
-    // If loading a new chapter but old content exists, show old content with an overlay indicator.
-    // This provides a smoother experience than a blank screen.
-    // However, for simplicity now, we'll just rebuild. A more advanced version might use a Stack.
-
     return SingleChildScrollView(
+      key: ValueKey(controller.currentChapterIndex.toString() + "_" + controller.currentPageInChapterIndex.toString()), // Force rebuild on page/chapter change
       controller: widget.scrollController, // Use the passed ScrollController
       padding: const EdgeInsets.all(kDefaultPadding),
       child: Html(
-        data: controller.currentChapterHtmlContent!,
+        data: controller.currentVisiblePageContent!, // Use the paginated content
         style: {
           "body": Style(
             fontSize: FontSize(controller.currentFontSize),
             lineHeight: LineHeight.em(1.5),
-            // Potentially add theme-based text color here later
           ),
           "p": Style(margin: Margins.only(bottom: controller.currentFontSize * 0.5)),
           "h1": Style(fontSize: FontSize(controller.currentFontSize * 1.8), fontWeight: FontWeight.bold),
           "h2": Style(fontSize: FontSize(controller.currentFontSize * 1.5), fontWeight: FontWeight.bold),
           "h3": Style(fontSize: FontSize(controller.currentFontSize * 1.3), fontWeight: FontWeight.bold),
-          // Add more styles as needed
         },
         onLinkTap: (url, attributes, element) async {
           ErrorHandler.logInfo("Link tapped: $url", scope: "EpubViewerWidget");
@@ -123,10 +120,6 @@ class _EpubViewerWidgetState extends State<EpubViewerWidget> {
                 }
               }
             } else {
-              // Handle internal EPUB links (e.g., footnotes, cross-references)
-              // This is more complex and might involve parsing the href to find a target
-              // within the current EPUB document or another spine item.
-              // For now, just log and show a message.
               ErrorHandler.logInfo("Internal EPUB link tapped: $url. Navigation not yet implemented.", scope: "EpubViewerWidget");
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(

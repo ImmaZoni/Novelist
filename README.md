@@ -60,7 +60,7 @@ See [Docs/Development/PRD.md](Docs/Development/PRD.md) for the full product requ
 1. **Clone the repository:**
    ```sh
    git clone https://github.com/immazoni/novelist.git
-   cd novelist
+   cd novelist/src
    ```
 
 2. **Install dependencies:**

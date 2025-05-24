@@ -83,7 +83,7 @@ See [Docs/Development/PRD.md](Docs/Development/PRD.md) for the full product requ
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [contribution guidelines](CONTRIBUTING.md) (coming soon) and open issues or pull requests for features, bug fixes, or ideas.
+We welcome contributions! Please see our [contribution guidelines](CONTRIBUTING.md) and open issues or pull requests for features, bug fixes, or ideas.
 
 ## 📝 License
 

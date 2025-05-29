@@ -37,16 +37,16 @@ Novelist is an open-source, cross-platform eReader application designed for desk
     *   FR1.2: Mobile: iOS, Android. - ✅ **Implemented (Project Structure)**
 *   **FR2: File Format Support (Leveraging Dart packages and Flutter rendering)**
     *   FR2.1: EPUB (EPUB 2 & EPUB 3) parsing and rendering.
-        *   Parsing for metadata (title, author via `epubx`): ✅ **Implemented** (Integrated into import flow via `MetadataService`)
-        *   Rendering (via `flutter_epub_viewer` package): ✅ **Implemented** (Switched from custom HTML rendering to `flutter_epub_viewer`. EPUB-specific logic encapsulated in `EpubPackageController` and `EpubPackageViewerWidget`. Supports paginated display, TOC navigation, page-by-page navigation, font size adjustment, and basic themes via the package's capabilities. Base64 image processing for custom HTML renderer removed as package handles images.)
+        *   Parsing for metadata (title, author, cover via `epubx` and `image` packages): ✅ **Implemented** (Integrated into import flow via `MetadataService`, cover saved to local file).
+        *   Rendering (via `flutter_epub_viewer` package): ✅ **Implemented** (Utilizes `flutter_epub_viewer` package. EPUB-specific logic encapsulated in `EpubPackageController` and `EpubPackageViewerWidget`. Supports paginated display, CFI-based navigation, TOC navigation, page-by-page navigation, font size adjustment, and basic themes (Light/Dark). `allowScriptedContent` set to true for better compatibility with EPUB internal JS.)
     *   FR2.2: PDF viewing (rendered as-is, reflow is out of scope for V1). - ⏳ **To Do** (Placeholder `pdf` directory created in `core/rendering`)
     *   FR2.3: MOBI/AZW viewing (best effort, as it's a proprietary format). - ⏳ **To Do**
     *   FR2.4: Plain Text (.txt) and HTML (.html) file viewing. - ⏳ **To Do**
 *   **FR3: Library Management**
-    *   FR3.1: Import books from local storage. - ✅ **Implemented** (File picking, copying to app storage, format detection, metadata extraction for EPUBs)
+    *   FR3.1: Import books from local storage. - ✅ **Implemented** (File picking, copying to app storage, format detection, metadata extraction for EPUBs including cover image saving).
     *   FR3.2: Display book metadata (title, author, cover, series if available).
         *   Title/Author display in list: ✅ **Implemented** (Uses extracted metadata or filename fallback)
-        *   Cover art display in list: ✅ **Partially Implemented** (Logic in `library_screen.dart`, needs full cover extraction in `MetadataService` during import and saving path to `Book` model. Currently no cover images shown in list.)
+        *   Cover art display in list: ✅ **Implemented** (`MetadataService` extracts cover during import. Users can also set a custom cover via long-press option in `LibraryScreen`, which opens `CoverSearchScreen` using an `InAppWebView` to search Google Images, download, and apply the selected image.)
         *   Series display: ⏳ **To Do**
     *   FR3.3: Grid and list view for the library.
         *   List view: ✅ **Implemented**
@@ -62,30 +62,39 @@ Novelist is an open-source, cross-platform eReader application designed for desk
         *   Font size adjustment: ✅ **Implemented** (Managed by `EpubPackageController`, UI in `ReadingScreen`'s settings dialog, applied via `flutter_epub_viewer`'s controller).
         *   Font family selection: ⏳ **To Do** (`flutter_epub_viewer` likely supports this via its JS layer; needs exposing through our controller).
     *   FR4.3: Layout customization: line spacing, margins. - ⏳ **To Do** (`flutter_epub_viewer` may support these; needs exposing).
-    *   FR4.4: Themes: Light, Dark, Sepia. Custom theme support is a plus for later. - ✅ **Partially Implemented** (Light/Dark themes can be applied via `EpubPackageController` using `flutter_epub_viewer`'s `EpubTheme.light()` and `EpubTheme.dark()`. Sepia requires `EpubTheme.custom()`).
+    *   FR4.4: Themes: Light, Dark, Sepia. Custom theme support is a plus for later. - ✅ **Implemented** (Light/Dark themes via `EpubPackageController` using `flutter_epub_viewer`'s `EpubTheme.light()` and `EpubTheme.dark()`. Sepia requires `EpubTheme.custom()` - UI for Sepia selection implemented).
     *   FR4.5: Bookmarking: Add, view, delete, and navigate to bookmarks. - ⏳ **To Do**
     *   FR4.6: Table of Contents navigation. - ✅ **Implemented** (TOC parsed by `flutter_epub_viewer`, exposed via `EpubPackageController`, interactive in `ReadingScreen`'s dialog).
-    *   FR4.7: Reading progress display (percentage, current page/total pages, current chapter). - ✅ **Partially Implemented** (`flutter_epub_viewer` provides progress via `EpubLocation`. Current CFI and last read timestamp are saved. UI display of page numbers/percentage in AppBar is basic).
+    *   FR4.7: Reading progress display (percentage, current page/total pages, current chapter). - ✅ **Partially Implemented** (`flutter_epub_viewer` provides progress via `EpubLocation`. AppBar in `ReadingScreen` shows basic page info for EPUBs if available from `EpubPackageController`).
     *   FR4.8: Full-screen reading mode. - ⏳ **To Do**
     *   FR4.9: Remember last read position for each book. - ✅ **Implemented** (Last read CFI from `flutter_epub_viewer` is saved to Hive via `ReadingScreen`).
     *   FR4.10: Dictionary lookup (integration with OS-level dictionary services via platform channels if needed). - ⏳ **To Do**
 *   **FR5: Syncing** - ⏳ **To Do (All Sub-items)**
-*   **FR6: Plugin System (Dart-based)** - ⏳ **To Do (All Sub-items)**
+    *   FR5.1: User authentication...
+    *   FR5.2: Option to select a dedicated app folder...
+    *   FR5.3: Sync entire book files.
+    *   FR5.4: Sync metadata...
+    *   FR5.5: Conflict resolution strategy...
+    *   FR5.6: Manual sync trigger...
+*   **FR6: Plugin System (Dart-based)** - ⏳ **To Do (All Sub-items)** (Conceptual structure in folders only)
+    *   FR6.1: Define clear Dart APIs/interfaces...
+    *   FR6.2: Mechanism for discovering, loading...
+    *   FR6.3: Basic permission model...
 *   **FR7: Settings**
-    *   FR7.1: General application settings (e.g., default theme, language). - ⏳ **To Do** (Placeholder `SettingsScreen` exists. Reader font size setting handled via `EpubPackageController`).
+    *   FR7.1: General application settings (e.g., default theme, language). - ⏳ **To Do** (Placeholder `SettingsScreen` exists. Reader font size and theme settings handled via `EpubPackageController`).
     *   FR7.2: Sync account management. - ⏳ **To Do**
     *   FR7.3: Plugin management interface. - ⏳ **To Do**
 
 **6. Non-Functional Requirements**
 *   **NFR1: Performance:**
     *   NFR1.1: App launch time < 3 seconds on modern hardware. - ⏳ **To Do (Pending Measurement)**
-    *   NFR1.2: Book opening time < 2 seconds for average-sized EPUBs. - ✅ **Implemented** (Loading via `flutter_epub_viewer` is generally performant).
-    *   NFR1.3: Smooth page turning and scrolling (target 60fps+ via Flutter's rendering engine). - ✅ **Implemented for EPUB** (Handled by `flutter_epub_viewer`'s web view).
+    *   NFR1.2: Book opening time < 2 seconds for average-sized EPUBs. - ✅ **Implemented** (Loading EPUBs via `flutter_epub_viewer` is performant).
+    *   NFR1.3: Smooth page turning and scrolling (target 60fps+ via Flutter's rendering engine). - ✅ **Implemented for EPUB** (Handled by `flutter_epub_viewer`'s WebView).
 *   **NFR2: Usability:**
-    *   NFR2.1: Intuitive and easy-to-navigate user interface. - ✅ **Partially Implemented** (Reader UI significantly improved and simplified by using `flutter_epub_viewer`).
+    *   NFR2.1: Intuitive and easy-to-navigate user interface. - ✅ **Implemented** (Basic library and reader navigation functional. Reader UI significantly improved by `flutter_epub_viewer`. Custom cover search enhances user control).
     *   NFR2.2: Adherence to platform-specific UI/UX conventions. - ⏳ **To Do**
     *   NFR2.3: Basic accessibility features. - ⏳ **To Do**
-*   **NFR3: Stability:** The application should be robust and minimize crashes. - ✅ **Partially Implemented** (Using a dedicated package for EPUB rendering should improve stability for that format. WebView-related issues (like the script blocking) have been addressed).
+*   **NFR3: Stability:** The application should be robust and minimize crashes. - ✅ **Implemented** (Using `flutter_epub_viewer` for EPUB rendering significantly improves stability. WebView interactions for cover search appear stable after JS refinements).
 *   **NFR4: Security:** Secure handling of cloud service credentials. - ⏳ **To Do**
 *   **NFR5: Open Source:**
     *   NFR5.1: Codebase hosted on a public repository. - ✅ **Implemented**
@@ -98,13 +107,20 @@ Novelist is an open-source, cross-platform eReader application designed for desk
 *   Consistent design language across all platforms. - ⏳ **To Do**
 *   Visual indicators for sync status. - ⏳ **To Do**
 
-**8. Success Metrics** - ⏳ **To Do (Post-Release)**
+**8. Success Metrics**
+*   Number of downloads and active users. - ⏳ **To Do (Post-Release)**
+*   Community engagement (e.g., GitHub stars, forks, issues, pull requests). - ⏳ **To Do (Post-Release)**
+*   Positive user reviews and feedback. - ⏳ **To Do (Post-Release)**
+*   Number of third-party Dart-based plugins developed (long-term). - ⏳ **To Do (Post-Release)**
+*   Successful cross-device syncing reported by users. - ⏳ **To Do (Post-Release)**
+
 **9. Future Considerations / Out of Scope for V1 Core**
-*   Advanced annotation features (highlighting, notes) (The package supports adding highlights).
+*   Advanced annotation features (highlighting, notes) (`flutter_epub_viewer` supports adding highlights; UI for managing them is To Do).
 *   Built-in ebook store integrations.
 *   Social reading features (sharing progress, recommendations).
 *   Support for more niche ebook formats.
-*   The two specific plugins (AI Audiobook, Crypto Storage) are separate.
+*   Further robustness improvements for custom cover image search JavaScript against changes in Google Images DOM.
+*   The two specific plugins (AI Audiobook, Crypto Storage) are separate but rely on this core and will also be developed using Dart/Flutter.
 
 **Legend:**
 *   ✅ **Implemented:** Feature is working as described.

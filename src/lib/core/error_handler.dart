@@ -38,4 +38,10 @@ class ErrorHandler {
     }
     // TODO: Optionally log to a file or analytics in production
   }
+
+  static void logError(String message, {String? scope}) {
+    if (kDebugMode) {
+      print('[ERROR${scope != null ? ' - $scope' : ''}] $message');
+    }
+  }
 }

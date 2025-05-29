@@ -7,7 +7,7 @@ import 'package:novelist/core/error_handler.dart';
 import 'package:novelist/core/app_constants.dart';
 import 'package:novelist/core/rendering/epub/epub_package_controller.dart';
 import 'package:novelist/core/rendering/epub/epub_package_viewer_widget.dart';
-import 'package:flutter_epub_viewer/flutter_epub_viewer.dart' show EpubChapter, EpubTheme, EpubThemeType; // Package types
+import 'package:flutter_epub_viewer/flutter_epub_viewer.dart' show EpubChapter, EpubTheme, EpubThemeType;
 import 'package:novelist/services/settings_service.dart'; // For ReaderThemeSetting enum
 
 class ReadingScreen extends StatefulWidget {
@@ -24,6 +24,10 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   bool _isControllerInitialized = false; 
 
+  // Available font families for the reader settings dropdown
+  final List<String> _readerFontFamilyOptions = const ['Default', 'Serif', 'Sans-Serif', 'Times New Roman', 'Arial', 'Georgia'];
+
+
   @override
   void initState() {
     super.initState();
@@ -39,8 +43,6 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   void _initializeEpubController() {
     _epubController.addListener(_onEpubControllerUpdate);
-    // _loadDefaultSettings was called in EpubPackageController constructor
-    // The actual EPUB loading is triggered by EpubPackageViewerWidget
     setState(() {
       _isControllerInitialized = true; 
     });
@@ -79,8 +81,16 @@ class _ReadingScreenState extends State<ReadingScreen> {
       
       bookToUpdate.lastRead = DateTime.now();
       await _libraryService.updateBook(bookToUpdate);
+      // Log page info if available, otherwise just CFI
+      String pageInfoForLog = "";
+      // Assuming flutter_epub_viewer's EpubLocation has progress which could be mapped to page numbers later
+      if (currentLocation != null && currentLocation.progress != null) {
+        // This is a placeholder, actual page number from progress needs calculation based on total locations
+        // pageInfoForLog = ", Progress: ${(currentLocation.progress! * 100).toStringAsFixed(1)}%";
+      }
+
       ErrorHandler.logInfo(
-          "Saved progress for ${widget.book.title} (CFI: ${bookToUpdate.lastLocation})",
+          "Saved progress for ${widget.book.title} (CFI: ${bookToUpdate.lastLocation ?? 'N/A'})$pageInfoForLog",
           scope: "ReadingScreen");
     } catch (e, s) {
       ErrorHandler.recordError(e, s, reason: "Failed to save reading progress for ${widget.book.title}", scope: "ReadingScreen");
@@ -107,7 +117,6 @@ class _ReadingScreenState extends State<ReadingScreen> {
               itemCount: _epubController.tableOfContents.length,
               itemBuilder: (context, index) {
                 final EpubChapter chapter = _epubController.tableOfContents[index];
-                // TODO: Implement highlighting of current chapter based on CFI comparison
                 return ListTile(
                   contentPadding: EdgeInsets.symmetric(horizontal: kDefaultPadding + ( (chapter.subitems?.isNotEmpty ?? false) ? 0 : 16.0 ) ),
                   title: Text(chapter.title ?? "Unknown Chapter"),
@@ -128,12 +137,13 @@ class _ReadingScreenState extends State<ReadingScreen> {
      if (!_isControllerInitialized) return;
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true, // Allow more content if needed
       builder: (BuildContext context) {
         return StatefulBuilder( 
           builder: (BuildContext context, StateSetter setModalState) {
             return Padding(
               padding: const EdgeInsets.all(kDefaultPadding),
-              child: SingleChildScrollView( // Added SingleChildScrollView for smaller screens
+              child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -145,7 +155,8 @@ class _ReadingScreenState extends State<ReadingScreen> {
                         IconButton(
                           icon: const Icon(Icons.remove_circle_outline),
                           onPressed: () {
-                            _epubController.setFontSize(_epubController.currentFontSize - 2).then((_) => setModalState(() {}));
+                            _epubController.setFontSize(_epubController.currentFontSize - 2)
+                              .then((_) => setModalState(() {}));
                           },
                         ),
                         Text(
@@ -155,7 +166,8 @@ class _ReadingScreenState extends State<ReadingScreen> {
                         IconButton(
                           icon: const Icon(Icons.add_circle_outline),
                           onPressed: () {
-                             _epubController.setFontSize(_epubController.currentFontSize + 2).then((_) => setModalState(() {}));
+                             _epubController.setFontSize(_epubController.currentFontSize + 2)
+                               .then((_) => setModalState(() {}));
                           },
                         ),
                       ],
@@ -173,7 +185,28 @@ class _ReadingScreenState extends State<ReadingScreen> {
                       }).toList(),
                       onChanged: (ReaderThemeSetting? newTheme) {
                         if (newTheme != null) {
-                          _epubController.setReaderTheme(newTheme).then((_) => setModalState(() {}));
+                          _epubController.setReaderTheme(newTheme)
+                            .then((_) => setModalState(() {}));
+                        }
+                      },
+                    ),
+                    const SizedBox(height: kDefaultPadding),
+                    Text("Font Family", style: Theme.of(context).textTheme.titleMedium),
+                    DropdownButton<String>(
+                      value: _readerFontFamilyOptions.contains(_epubController.currentReaderFontFamily) 
+                             ? _epubController.currentReaderFontFamily 
+                             : 'Default',
+                      isExpanded: true,
+                      items: _readerFontFamilyOptions.map((String fontFamily) {
+                        return DropdownMenuItem<String>(
+                          value: fontFamily,
+                          child: Text(fontFamily),
+                        );
+                      }).toList(),
+                      onChanged: (String? newFontFamily) {
+                        if (newFontFamily != null) {
+                          _epubController.setReaderFontFamily(newFontFamily)
+                            .then((_) => setModalState(() {}));
                         }
                       },
                     ),
@@ -206,14 +239,21 @@ class _ReadingScreenState extends State<ReadingScreen> {
       );
     }
 
-    // Use a ValueListenableBuilder or similar if you want to rebuild AppBar title only when controller._bookTitleFromEpub changes
-    // For now, setState in _onEpubControllerUpdate will rebuild the whole screen for simplicity.
-    String appBarTitle = _epubController.bookTitleFromEpub;
-    // Potentially add page number info here later if _epubController exposes it
-    // String pageInfo = "";
-    // if (!_epubController.isLoading && _epubController.totalPagesInCurrentChapter > 0) {
-    //   pageInfo = "Page X of Y"; // Need actual page info from package controller
-    // }
+    String appBarTitle = _isControllerInitialized ? _epubController.bookTitleFromEpub : widget.book.title;
+    String pageInfo = "";
+
+    // Attempt to get page info from EpubLocation (progress percentage)
+    // This is a simplified representation. Actual page numbers are harder to get accurately.
+    if (_isControllerInitialized && !_epubController.isLoading && _epubController.currentCfiLocation != null) {
+      // Try to get progress from the controller if it updates it from onRelocated
+      // For a more direct approach, we'd need to call getCurrentLocation() but that's async.
+      // For now, let's assume _currentCfiLocation implies some progress.
+      // A better way would be for _epubController to store and expose current progress.
+      // For simplicity, we'll omit page numbers from AppBar for now, as flutter_epub_viewer doesn't directly give page X of Y easily.
+    }
+     if (_isControllerInitialized && _epubController.isLoading) {
+       pageInfo = "Loading...";
+     }
 
 
     return PopScope(
@@ -226,6 +266,11 @@ class _ReadingScreenState extends State<ReadingScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(appBarTitle, overflow: TextOverflow.ellipsis),
+          // If you want to add pageInfo to AppBar, uncomment and refine below:
+          // bottom: pageInfo.isNotEmpty ? PreferredSize(
+          //   preferredSize: Size.fromHeight(20.0),
+          //   child: Text(pageInfo, style: TextStyle(fontSize: 12)),
+          // ) : null,
           actions: _isControllerInitialized && !_epubController.isLoading 
                      ? _buildAppBarActions() 
                      : [ const Padding(padding: EdgeInsets.all(16.0), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))) ],

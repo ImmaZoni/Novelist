@@ -1,14 +1,15 @@
 // lib/services/settings_service.dart
-import 'package:flutter/material.dart'; // For ThemeMode
+import 'package:flutter/material.dart'; 
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:novelist/core/app_constants.dart'; // For keys
+import 'package:novelist/core/app_constants.dart';
+import 'package:novelist/core/error_handler.dart';
 
-// Define an enum for our reader themes if not using ThemeMode directly for all
 enum ReaderThemeSetting { light, dark, sepia, system }
 
 class SettingsService {
-  static const String _keyReaderTheme = 'reader_theme';
-  static const String _keyDefaultFontSize = 'default_font_size';
+  static const String _keyReaderTheme = 'reader_theme_v2'; // Added v2 for new enum
+  static const String _keyDefaultFontSize = 'default_font_size_v2'; // Added v2
+  static const String _keyReaderFontFamily = 'reader_font_family_v2'; // Added v2
 
   SharedPreferences? _prefs;
 
@@ -19,7 +20,7 @@ class SettingsService {
   // --- Reader Theme ---
   Future<void> saveReaderTheme(ReaderThemeSetting theme) async {
     await _initPrefs();
-    await _prefs!.setString(_keyReaderTheme, theme.name); // Store enum by its name
+    await _prefs!.setString(_keyReaderTheme, theme.name); 
   }
 
   Future<ReaderThemeSetting> getReaderTheme() async {
@@ -29,10 +30,11 @@ class SettingsService {
       try {
         return ReaderThemeSetting.values.byName(themeName);
       } catch (_) {
-        return ReaderThemeSetting.system; // Default if stored value is invalid
+        ErrorHandler.logWarning("Invalid stored reader theme: $themeName, defaulting to system.", scope: "SettingsService");
+        return ReaderThemeSetting.system; 
       }
     }
-    return ReaderThemeSetting.system; // Default
+    return ReaderThemeSetting.system; 
   }
 
   // --- Default Font Size ---
@@ -43,9 +45,20 @@ class SettingsService {
 
   Future<double> getDefaultFontSize() async {
     await _initPrefs();
-    return _prefs!.getDouble(_keyDefaultFontSize) ?? 16.0; // Default font size
+    return _prefs!.getDouble(_keyDefaultFontSize) ?? 16.0; 
   }
 
+  // --- Reader Font Family ---
+  Future<void> saveReaderFontFamily(String fontFamily) async {
+    await _initPrefs();
+    await _prefs!.setString(_keyReaderFontFamily, fontFamily);
+  }
+
+  Future<String> getReaderFontFamily() async {
+    await _initPrefs();
+    return _prefs!.getString(_keyReaderFontFamily) ?? 'Default'; 
+  }
+  
   // --- App Theme (controls MaterialApp light/dark/system) ---
   Future<void> saveAppThemeMode(ThemeMode themeMode) async {
     await _initPrefs();
@@ -59,6 +72,7 @@ class SettingsService {
       try {
         return ThemeMode.values.byName(themeName);
       } catch (_) {
+        ErrorHandler.logWarning("Invalid stored app theme: $themeName, defaulting to system.", scope: "SettingsService");
         return ThemeMode.system; 
       }
     }

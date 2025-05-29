@@ -4,14 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:novelist/models/book.dart' as app_book;
 import 'package:flutter_epub_viewer/flutter_epub_viewer.dart';
 import 'package:novelist/core/error_handler.dart';
-import 'package:novelist/services/settings_service.dart'; // Import SettingsService
+import 'package:novelist/services/settings_service.dart';
 
 class EpubPackageController with ChangeNotifier {
   final app_book.Book _appBook;
-  final EpubController packageController; // Controller from flutter_epub_viewer
-  final SettingsService _settingsService = SettingsService(); // Instance of SettingsService
+  final EpubController packageController;
+  final SettingsService _settingsService = SettingsService();
 
-  // --- State ---
   bool _isLoading = true;
   bool get isLoading => _isLoading;
 
@@ -27,25 +26,26 @@ class EpubPackageController with ChangeNotifier {
   String? _currentCfiLocation;
   String? get currentCfiLocation => _currentCfiLocation;
 
-  double _currentFontSize = 16.0; // Default, will be overridden by loaded settings
+  double _currentFontSize = 16.0;
   double get currentFontSize => _currentFontSize;
 
-  ReaderThemeSetting _currentReaderThemeSetting = ReaderThemeSetting.system; // Default
+  ReaderThemeSetting _currentReaderThemeSetting = ReaderThemeSetting.system;
   ReaderThemeSetting get currentReaderThemeSetting => _currentReaderThemeSetting;
 
+  String _currentReaderFontFamily = 'Default';
+  String get currentReaderFontFamily => _currentReaderFontFamily;
 
   EpubPackageController({required app_book.Book appBook})
       : _appBook = appBook,
         packageController = EpubController() {
-    _loadDefaultSettings(); 
+    _loadDefaultSettings();
   }
 
   Future<void> _loadDefaultSettings() async {
     _currentFontSize = await _settingsService.getDefaultFontSize();
     _currentReaderThemeSetting = await _settingsService.getReaderTheme();
-    // Initial application of theme and font size will happen in onEpubLoaded
-    // or can be triggered here if packageController is ready, but onEpubLoaded is safer.
-    notifyListeners(); // Notify for initial font size if UI uses it before EPUB load
+    _currentReaderFontFamily = await _settingsService.getReaderFontFamily();
+    notifyListeners(); 
   }
   
   void _applyCurrentThemeToViewer() {
@@ -65,36 +65,61 @@ class EpubPackageController with ChangeNotifier {
         break;
       case ReaderThemeSetting.system:
       default:
-        // Check platform brightness. Note: This won't auto-update if system theme changes while app is running
-        // unless we add a listener for platform brightness changes.
         final Brightness platformBrightness = 
             WidgetsBinding.instance.platformDispatcher.platformBrightness;
         themeToApply = platformBrightness == Brightness.dark ? EpubTheme.dark() : EpubTheme.light();
         break;
     }
     try {
-      packageController.updateTheme(theme: themeToApply);
-      ErrorHandler.logInfo("Applied reader theme: ${_currentReaderThemeSetting.name}", scope: "EpubPackageController");
+      if (packageController.webViewController != null) { // Check if controller is ready
+        packageController.updateTheme(theme: themeToApply);
+        ErrorHandler.logInfo("Applied reader theme: ${_currentReaderThemeSetting.name}", scope: "EpubPackageController");
+      } else {
+         ErrorHandler.logWarning("WebViewController not ready for theme update.", scope: "EpubPackageController");
+      }
     } catch(e, s) {
        ErrorHandler.recordError(e, s, reason: "Error applying theme in controller", scope:"EpubPackageController");
     }
   }
 
-  // --- Callbacks for EpubViewer ---
+  Future<void> _applyCurrentFontFamilyToViewer() async {
+    if (packageController.webViewController == null) {
+      ErrorHandler.logWarning("WebViewController not ready, cannot apply font family.", scope: "EpubPackageController");
+      return;
+    }
+    
+    String jsCommand;
+    if (_currentReaderFontFamily == 'Default' || _currentReaderFontFamily.isEmpty) {
+      // To reset to default, Epub.js usually reapplies theme styles or accepts an empty string.
+      // Passing an empty string or 'inherit' might work.
+      jsCommand = "window.rendition.themes.font('');"; // Or 'inherit'
+      ErrorHandler.logInfo("Applying default font family.", scope: "EpubPackageController");
+    } else {
+      jsCommand = "window.rendition.themes.font('$_currentReaderFontFamily');";
+    }
+    
+    try {
+      await packageController.webViewController!.evaluateJavascript(source: jsCommand);
+      ErrorHandler.logInfo("Applied font family: $_currentReaderFontFamily via JS: $jsCommand", scope: "EpubPackageController");
+    } catch (e,s) {
+      ErrorHandler.recordError(e, s, reason: "Error applying font family '$_currentReaderFontFamily'", scope: "EpubPackageController");
+    }
+  }
+
   EpubSource get epubSource => EpubSource.fromFile(File(_appBook.filePath));
   String? get initialCfi => _appBook.lastLocation;
 
   void onEpubLoaded() {
     ErrorHandler.logInfo("EpubPackageController: EPUB loaded for ${_appBook.title}", scope: "EpubPackageController");
-    _isLoading = false; // Set loading to false
     
     packageController.parseChapters().then((chapters) {
       _tocChapters = chapters;
       notifyListeners();
-    }).catchError((e, s) {
+    }).catchError((e, s) { 
       ErrorHandler.recordError(e, s, reason: "Failed to parse chapters on load", scope: "EpubPackageController");
     });
 
+    // Apply settings now that viewer is confirmed ready
     try {
       packageController.setFontSize(fontSize: _currentFontSize);
       ErrorHandler.logInfo("Applied initial font size: $_currentFontSize", scope: "EpubPackageController");
@@ -102,9 +127,12 @@ class EpubPackageController with ChangeNotifier {
       ErrorHandler.recordError(e, s, reason: "Error setting initial font size", scope:"EpubPackageController");
     }
     
-    _applyCurrentThemeToViewer(); // Apply the loaded/default theme
-
-    notifyListeners();
+    _applyCurrentThemeToViewer();
+    _applyCurrentFontFamilyToViewer().then((_) {
+      // Set isLoading to false after all initial settings are attempted
+       _isLoading = false;
+       notifyListeners();
+    });
   }
 
   void onChaptersLoaded(List<EpubChapter> chapters) {
@@ -118,7 +146,6 @@ class EpubPackageController with ChangeNotifier {
     notifyListeners();
   }
 
-  // --- Actions ---
   void nextPage() {
     try { packageController.next(); } 
     catch (e) { ErrorHandler.logWarning("Error on nextPage: $e", scope: "EpubPackageController"); }
@@ -134,24 +161,42 @@ class EpubPackageController with ChangeNotifier {
      catch (e) { ErrorHandler.logWarning("Error on navigateToCfi ($cfi): $e", scope: "EpubPackageController"); }
   }
 
-  Future<void> setFontSize(double size) async { // Make async if saving is async
-    _currentFontSize = size.clamp(10.0, 30.0);
-    try {
-      packageController.setFontSize(fontSize: _currentFontSize);
-    } catch (e) { ErrorHandler.logWarning("Error on setFontSize: $e", scope: "EpubPackageController"); }
-    
+  Future<void> setFontSize(double size) async {
+    double newFontSize = size.clamp(10.0, 30.0);
+    if (newFontSize == _currentFontSize) return;
+
+    _currentFontSize = newFontSize;
+    if (packageController.webViewController != null) {
+      try {
+        await packageController.setFontSize(fontSize: _currentFontSize);
+      } catch (e) { ErrorHandler.logWarning("Error on setFontSize: $e", scope: "EpubPackageController"); }
+    }
     await _settingsService.saveDefaultFontSize(_currentFontSize); 
     notifyListeners();
   }
 
-  Future<void> setReaderTheme(ReaderThemeSetting themeSetting) async { // Make async
+  Future<void> setReaderTheme(ReaderThemeSetting themeSetting) async {
+    if (themeSetting == _currentReaderThemeSetting) return;
     _currentReaderThemeSetting = themeSetting;
-    _applyCurrentThemeToViewer(); // Apply it immediately to the viewer
-    await _settingsService.saveReaderTheme(themeSetting); // Save the choice
+    if (packageController.webViewController != null) {
+      _applyCurrentThemeToViewer();
+    }
+    await _settingsService.saveReaderTheme(themeSetting);
+    notifyListeners();
+  }
+
+  Future<void> setReaderFontFamily(String fontFamily) async {
+    if (fontFamily == _currentReaderFontFamily) return;
+    _currentReaderFontFamily = fontFamily;
+    if (packageController.webViewController != null) {
+      await _applyCurrentFontFamilyToViewer();
+    }
+    await _settingsService.saveReaderFontFamily(_currentReaderFontFamily);
     notifyListeners();
   }
   
   Future<EpubLocation?> getCurrentViewerLocation() async {
+    if (packageController.webViewController == null) return null;
     try {
       return await packageController.getCurrentLocation();
     } catch (e,s) {
@@ -163,8 +208,6 @@ class EpubPackageController with ChangeNotifier {
   @override
   void dispose() {
     ErrorHandler.logInfo("EpubPackageController disposed for ${_appBook.title}", scope: "EpubPackageController");
-    // packageController from flutter_epub_viewer does not have a public dispose method.
-    // It relies on its InAppWebViewController being disposed by the EpubViewer widget.
     super.dispose();
   }
 }

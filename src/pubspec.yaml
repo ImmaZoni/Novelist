@@ -47,6 +47,7 @@ dependencies:
   html: ^0.15.6
   flutter_epub_viewer: ^1.2.1
   image: ^3.3.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:

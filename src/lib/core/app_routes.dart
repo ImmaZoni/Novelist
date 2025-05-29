@@ -38,24 +38,3 @@ class AppRoutes {
     );
   }
 }
-
-// To use named routes in main.dart:
-//
-// class NovelistApp extends StatelessWidget {
-//   const NovelistApp({super.key});
-//
-//   @override
-//   Widget build(BuildContext context) {
-//     return MaterialApp(
-//       title: 'Novelist',
-//       theme: ThemeData(
-//         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),
-//       ),
-//       initialRoute: AppRoutes.library, // Set initial route
-//       onGenerateRoute: AppRoutes.generateRoute, // Use the route generator
-//     );
-//   }
-// }
-//
-// And to navigate:
-// Navigator.pushNamed(context, AppRoutes.reading, arguments: myBook);

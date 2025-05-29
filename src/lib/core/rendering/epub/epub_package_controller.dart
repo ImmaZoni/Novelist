@@ -1,21 +1,18 @@
 // lib/core/rendering/epub/epub_package_controller.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:novelist/models/book.dart' as app_book; // Aliasing to avoid conflict
-import 'package:flutter_epub_viewer/flutter_epub_viewer.dart'; // Package components
+import 'package:novelist/models/book.dart' as app_book;
+import 'package:flutter_epub_viewer/flutter_epub_viewer.dart';
 import 'package:novelist/core/error_handler.dart';
-// We don't need our own TocEntry as the package provides EpubChapter
+import 'package:novelist/services/settings_service.dart'; // Import SettingsService
 
 class EpubPackageController with ChangeNotifier {
-  final app_book.Book _appBook; // Our application's Book model
+  final app_book.Book _appBook;
   final EpubController packageController; // Controller from flutter_epub_viewer
-
-  EpubPackageController({required app_book.Book appBook})
-      : _appBook = appBook,
-        packageController = EpubController(); // Initialize the package's controller
+  final SettingsService _settingsService = SettingsService(); // Instance of SettingsService
 
   // --- State ---
-  bool _isLoading = true; // Tracks initial loading of the book by the viewer
+  bool _isLoading = true;
   bool get isLoading => _isLoading;
 
   String? _loadingError;
@@ -24,50 +21,88 @@ class EpubPackageController with ChangeNotifier {
   List<EpubChapter> _tocChapters = [];
   List<EpubChapter> get tableOfContents => _tocChapters;
 
-  String _bookTitleFromEpub = ""; // Title from EPUB metadata
+  String _bookTitleFromEpub = "";
   String get bookTitleFromEpub => _bookTitleFromEpub.isNotEmpty ? _bookTitleFromEpub : _appBook.title;
   
-  // Current reading location (CFI) - might be updated by onRelocated callback
   String? _currentCfiLocation;
   String? get currentCfiLocation => _currentCfiLocation;
 
-  // Font size - we manage this so we can persist it and apply it
-  double _currentFontSize = 16.0;
+  double _currentFontSize = 16.0; // Default, will be overridden by loaded settings
   double get currentFontSize => _currentFontSize;
 
-  // Theme - similar to font size
-  // EpubTheme _currentTheme = EpubTheme.light(); // Example
-  // EpubTheme get currentTheme => _currentTheme;
+  ReaderThemeSetting _currentReaderThemeSetting = ReaderThemeSetting.system; // Default
+  ReaderThemeSetting get currentReaderThemeSetting => _currentReaderThemeSetting;
 
-  // --- Initialization and Callbacks for EpubViewer ---
+
+  EpubPackageController({required app_book.Book appBook})
+      : _appBook = appBook,
+        packageController = EpubController() {
+    _loadDefaultSettings(); 
+  }
+
+  Future<void> _loadDefaultSettings() async {
+    _currentFontSize = await _settingsService.getDefaultFontSize();
+    _currentReaderThemeSetting = await _settingsService.getReaderTheme();
+    // Initial application of theme and font size will happen in onEpubLoaded
+    // or can be triggered here if packageController is ready, but onEpubLoaded is safer.
+    notifyListeners(); // Notify for initial font size if UI uses it before EPUB load
+  }
+  
+  void _applyCurrentThemeToViewer() {
+    EpubTheme themeToApply;
+    switch (_currentReaderThemeSetting) {
+      case ReaderThemeSetting.light:
+        themeToApply = EpubTheme.light();
+        break;
+      case ReaderThemeSetting.dark:
+        themeToApply = EpubTheme.dark();
+        break;
+      case ReaderThemeSetting.sepia:
+        themeToApply = EpubTheme.custom(
+          backgroundColor: const Color(0xFFFBF0D9), 
+          foregroundColor: const Color(0xFF5B4636)
+        );
+        break;
+      case ReaderThemeSetting.system:
+      default:
+        // Check platform brightness. Note: This won't auto-update if system theme changes while app is running
+        // unless we add a listener for platform brightness changes.
+        final Brightness platformBrightness = 
+            WidgetsBinding.instance.platformDispatcher.platformBrightness;
+        themeToApply = platformBrightness == Brightness.dark ? EpubTheme.dark() : EpubTheme.light();
+        break;
+    }
+    try {
+      packageController.updateTheme(theme: themeToApply);
+      ErrorHandler.logInfo("Applied reader theme: ${_currentReaderThemeSetting.name}", scope: "EpubPackageController");
+    } catch(e, s) {
+       ErrorHandler.recordError(e, s, reason: "Error applying theme in controller", scope:"EpubPackageController");
+    }
+  }
+
+  // --- Callbacks for EpubViewer ---
   EpubSource get epubSource => EpubSource.fromFile(File(_appBook.filePath));
-  String? get initialCfi => _appBook.lastLocation; // Use our saved CFI
+  String? get initialCfi => _appBook.lastLocation;
 
   void onEpubLoaded() {
     ErrorHandler.logInfo("EpubPackageController: EPUB loaded for ${_appBook.title}", scope: "EpubPackageController");
-    _isLoading = false;
+    _isLoading = false; // Set loading to false
     
-    // Fetch title from actual book if available
-    // The package itself doesn't directly expose the book title via its controller easily.
-    // We can rely on our MetadataService for this, or try to parse it if needed,
-    // but for now, the app_book.title is a good default.
-    // If Epub.js has a way to get it via JS eval, that's an option for later.
-
-    // Attempt to parse chapters once loaded
     packageController.parseChapters().then((chapters) {
       _tocChapters = chapters;
-      notifyListeners(); // Notify listeners that TOC might be ready
+      notifyListeners();
     }).catchError((e, s) {
-      ErrorHandler.recordError(e, s, reason: "Failed to parse chapters", scope: "EpubPackageController");
+      ErrorHandler.recordError(e, s, reason: "Failed to parse chapters on load", scope: "EpubPackageController");
     });
 
-    // Apply initial font size (could be loaded from user settings)
-    // TODO: Load _currentFontSize from a settings service
-    packageController.setFontSize(fontSize: _currentFontSize);
+    try {
+      packageController.setFontSize(fontSize: _currentFontSize);
+      ErrorHandler.logInfo("Applied initial font size: $_currentFontSize", scope: "EpubPackageController");
+    } catch (e,s) { 
+      ErrorHandler.recordError(e, s, reason: "Error setting initial font size", scope:"EpubPackageController");
+    }
     
-    // Apply initial theme
-    // TODO: Load theme from settings and apply
-    // packageController.updateTheme(theme: _currentTheme);
+    _applyCurrentThemeToViewer(); // Apply the loaded/default theme
 
     notifyListeners();
   }
@@ -80,65 +115,56 @@ class EpubPackageController with ChangeNotifier {
 
   void onRelocated(EpubLocation location) {
     _currentCfiLocation = location.startCfi;
-    // ErrorHandler.logInfo("EpubPackageController: Relocated to ${location.startCfi}, progress: ${location.progress}", scope: "EpubPackageController");
-    // Persist this location via a method call if needed immediately, or rely on _saveReadingProgress in ReadingScreen
-    notifyListeners(); // If any UI depends on the current location
+    notifyListeners();
   }
 
   // --- Actions ---
   void nextPage() {
-    try {
-      packageController.next();
-    } catch (e) { ErrorHandler.logWarning("Error on nextPage: $e", scope: "EpubPackageController"); }
+    try { packageController.next(); } 
+    catch (e) { ErrorHandler.logWarning("Error on nextPage: $e", scope: "EpubPackageController"); }
   }
 
   void previousPage() {
-     try {
-      packageController.prev();
-    } catch (e) { ErrorHandler.logWarning("Error on prevPage: $e", scope: "EpubPackageController"); }
+     try { packageController.prev(); } 
+     catch (e) { ErrorHandler.logWarning("Error on prevPage: $e", scope: "EpubPackageController"); }
   }
 
   void navigateToCfi(String cfi) {
-     try {
-      packageController.display(cfi: cfi);
-    } catch (e) { ErrorHandler.logWarning("Error on navigateToCfi ($cfi): $e", scope: "EpubPackageController"); }
+     try { packageController.display(cfi: cfi); } 
+     catch (e) { ErrorHandler.logWarning("Error on navigateToCfi ($cfi): $e", scope: "EpubPackageController"); }
   }
 
-  void setFontSize(double size) {
+  Future<void> setFontSize(double size) async { // Make async if saving is async
     _currentFontSize = size.clamp(10.0, 30.0);
     try {
       packageController.setFontSize(fontSize: _currentFontSize);
     } catch (e) { ErrorHandler.logWarning("Error on setFontSize: $e", scope: "EpubPackageController"); }
+    
+    await _settingsService.saveDefaultFontSize(_currentFontSize); 
     notifyListeners();
-    // TODO: Persist font size choice
-    // ConfigService.setReaderConfig("fontSize", _currentFontSize.toString());
   }
 
-  void updateTheme(EpubTheme theme) {
-    // _currentTheme = theme;
-    try {
-      packageController.updateTheme(theme: theme);
-    } catch (e) { ErrorHandler.logWarning("Error on updateTheme: $e", scope: "EpubPackageController"); }
+  Future<void> setReaderTheme(ReaderThemeSetting themeSetting) async { // Make async
+    _currentReaderThemeSetting = themeSetting;
+    _applyCurrentThemeToViewer(); // Apply it immediately to the viewer
+    await _settingsService.saveReaderTheme(themeSetting); // Save the choice
     notifyListeners();
-    // TODO: Persist theme choice
   }
   
-  // Method to get current location for saving
   Future<EpubLocation?> getCurrentViewerLocation() async {
     try {
       return await packageController.getCurrentLocation();
-    } catch (e) {
-      ErrorHandler.logWarning("Error getting current location: $e", scope: "EpubPackageController");
+    } catch (e,s) {
+      ErrorHandler.recordError(e,s, reason: "Error getting current location", scope: "EpubPackageController");
       return null;
     }
   }
 
-
   @override
   void dispose() {
-    // The flutter_epub_viewer's EpubController doesn't have a public dispose method.
-    // Its InAppWebViewController is disposed when the EpubViewer widget is disposed.
     ErrorHandler.logInfo("EpubPackageController disposed for ${_appBook.title}", scope: "EpubPackageController");
+    // packageController from flutter_epub_viewer does not have a public dispose method.
+    // It relies on its InAppWebViewController being disposed by the EpubViewer widget.
     super.dispose();
   }
 }

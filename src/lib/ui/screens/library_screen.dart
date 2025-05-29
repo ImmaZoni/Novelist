@@ -1,17 +1,19 @@
 // lib/ui/screens/library_screen.dart
 import 'package:flutter/material.dart';
 import 'package:novelist/models/book.dart';
-import 'package:novelist/services/library_service.dart'; // Import the service
+import 'package:novelist/services/library_service.dart';
 import 'package:novelist/ui/screens/reading_screen.dart';
-import 'package:novelist/ui/screens/settings_screen.dart'; // Import settings screen
+import 'package:novelist/ui/screens/settings_screen.dart';
 import 'dart:io'; // For File operations
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p; // Already in pubspec from utils.dart
-import 'package:novelist/core/utils.dart'; // For getFileExtension
-import 'package:permission_handler/permission_handler.dart'; // For permissions
+import 'package:path/path.dart' as p;
+import 'package:novelist/core/utils.dart';
 import 'package:novelist/core/error_handler.dart';
 import 'package:novelist/services/metadata_service.dart';
+import 'package:novelist/core/app_constants.dart';
+// Import the new screen (we'll create it next and then uncomment this)
+import 'package:novelist/ui/screens/cover_search_screen.dart'; 
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -21,8 +23,8 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
-  final LibraryService _libraryService = LibraryService(); // Instantiate your service
-  late Future<List<Book>> _booksFuture; // To hold the future for books
+  final LibraryService _libraryService = LibraryService();
+  late Future<List<Book>> _booksFuture;
 
   @override
   void initState() {
@@ -31,124 +33,97 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _loadLibrary() async {
-    // Initialize the service and then load books
-    await _libraryService.init(); // Ensure service (and box) is initialized
+    await _libraryService.init();
     setState(() {
       _booksFuture = _libraryService.getBooks();
     });
   }
 
   void _refreshLibrary() {
-    // Call this after adding/deleting books to update the UI
     setState(() {
       _booksFuture = _libraryService.getBooks();
     });
   }
 
-
-Future<void> _importBook() async {
-  // Request permissions if needed (especially for Android)
-  // On desktop, file picker usually handles this. On mobile, explicit permission might be needed
-  // for broader storage access, though FilePicker can sometimes work without it for specific types.
-  // For simplicity, let's assume FilePicker handles what it can, but be mindful of platform differences.
-  // if (Platform.isAndroid || Platform.isIOS) {
-  //   var status = await Permission.storage.status; // or photos, mediaLibrary depending on scope
-  //   if (!status.isGranted) {
-  //     status = await Permission.storage.request();
-  //   }
-  //   if (!status.isGranted) {
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       const SnackBar(content: Text('Storage permission denied')),
-  //     );
-  //     return;
-  //   }
-  // }
-
-  FilePickerResult? result = await FilePicker.platform.pickFiles(
-    type: FileType.custom,
-    allowedExtensions: ['epub', 'pdf', 'mobi', 'txt', 'html'], // Define supported extensions
-  );
-
-  if (result != null && result.files.single.path != null) {
-    PlatformFile file = result.files.single;
-    String originalPath = file.path!;
-
-    try {
-      // 1. Get app's document directory
-      final Directory appDocDir = await getApplicationDocumentsDirectory();
-      final String booksDir = p.join(appDocDir.path, 'books');
-      await Directory(booksDir).create(recursive: true); // Ensure 'books' directory exists
-
-      // 2. Create a unique filename or use the original, then copy
-      final String fileName = p.basename(originalPath);
-      final String newFilePath = p.join(booksDir, fileName);
-
-      // Check if a book with this newFilePath already exists to avoid duplicates by path
-      // (A more robust check might involve hashing the file or checking metadata)
-      List<Book> currentBooks = await _libraryService.getBooks();
-      if (currentBooks.any((book) => book.filePath == newFilePath)) {
-         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Book "${p.basename(newFilePath)}" already in library.')),
-        );
-        return;
-      }
-
-      await File(originalPath).copy(newFilePath);
-
-      // 3. Determine book format (basic guess from extension)
-      BookFormat format = BookFormat.unknown;
-      String extension = getFileExtension(newFilePath); // From your utils.dart
-      switch (extension) {
-        case 'epub':
-          format = BookFormat.epub;
-          break;
-        case 'pdf':
-          format = BookFormat.pdf;
-          break;
-        case 'mobi':
-          format = BookFormat.mobi;
-          break;
-        case 'txt':
-          format = BookFormat.txt;
-          break;
-        case 'html':
-          format = BookFormat.html;
-          break;
-      }
-
-      // Example of calling a (yet to be created) metadata service
-      Map<String, String?> extractedMeta = await MetadataService.extractMetadata(newFilePath, format);
-
-      String titleFromFile = extractedMeta['title'] ?? p.basenameWithoutExtension(newFilePath);
-      String? authorFromFile = extractedMeta['author'];
-      String? coverPathFromFile = extractedMeta['coverPath']; // You'll need to implement cover saving in MetadataService for this
-
-      final newBook = Book(
-        title: titleFromFile,
-        author: authorFromFile,
-        filePath: newFilePath,
-        format: format,
-        coverImagePath: coverPathFromFile, // Populate this
-      );
-
-await _libraryService.addBook(newBook);
-      _refreshLibrary();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Imported: ${newBook.title}')),
-      );
-    } catch (e, s) {
-      ErrorHandler.recordError(e, s, reason: "Failed to import book: $originalPath");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error importing book: $e')),
-      );
-    }
-  } else {
-    // User canceled the picker
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Book import cancelled')),
+  Future<void> _importBook() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['epub', 'pdf', 'mobi', 'txt', 'html'],
     );
+
+    if (result != null && result.files.single.path != null) {
+      PlatformFile file = result.files.single;
+      String originalPath = file.path!;
+
+      try {
+        final Directory appDocDir = await getApplicationDocumentsDirectory();
+        final String booksDir = p.join(appDocDir.path, 'books');
+        await Directory(booksDir).create(recursive: true);
+
+        final String fileName = p.basename(originalPath);
+        final String newFilePath = p.join(booksDir, fileName);
+
+        List<Book> currentBooks = await _libraryService.getBooks();
+        if (currentBooks.any((book) => book.filePath == newFilePath)) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Book "${p.basename(newFilePath)}" already in library.')),
+            );
+          }
+          return;
+        }
+
+        await File(originalPath).copy(newFilePath);
+
+        BookFormat format = BookFormat.unknown;
+        String extension = getFileExtension(newFilePath);
+        switch (extension) {
+          case 'epub':
+            format = BookFormat.epub;
+            break;
+          case 'pdf':
+            format = BookFormat.pdf;
+            break;
+          // Add other cases as needed
+        }
+
+        Map<String, String?> extractedMeta = await MetadataService.extractMetadata(newFilePath, format);
+
+        String titleFromFile = extractedMeta['title'] ?? p.basenameWithoutExtension(newFilePath);
+        String? authorFromFile = extractedMeta['author'];
+        String? coverPathFromFile = extractedMeta['coverPath']; 
+
+        final newBook = Book(
+          title: titleFromFile,
+          author: authorFromFile,
+          filePath: newFilePath,
+          format: format,
+          coverImagePath: coverPathFromFile,
+        );
+
+        await _libraryService.addBook(newBook);
+        _refreshLibrary();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Imported: ${newBook.title}')),
+          );
+        }
+      } catch (e, s) {
+        ErrorHandler.recordError(e, s, reason: "Failed to import book: $originalPath");
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error importing book: $e')),
+          );
+        }
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Book import cancelled')),
+        );
+      }
+    }
   }
-}
 
   void _openBook(Book book) {
     Navigator.push(
@@ -157,16 +132,12 @@ await _libraryService.addBook(newBook);
         builder: (context) => ReadingScreen(book: book),
       ),
     ).then((_) {
-      // When returning from ReadingScreen, the book's progress might have changed.
-      // If the book object was modified and saved in ReadingScreen,
-      // you might want to refresh or find a way to update just that item.
-      _refreshLibrary(); // Simple refresh for now
+      _refreshLibrary();
     });
   }
 
-   Future<void> _deleteBook(Book book) async {
-    // Show a confirmation dialog
-    final confirmDelete = await showDialog<bool>(
+  Future<void> _deleteBook(Book book) async {
+     final confirmDelete = await showDialog<bool>(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
@@ -187,12 +158,74 @@ await _libraryService.addBook(newBook);
     );
 
     if (confirmDelete == true) {
-      await _libraryService.deleteBook(book.id);
-      _refreshLibrary();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Deleted: ${book.title}')),
-      );
+      try {
+        await _libraryService.deleteBook(book.id); 
+        _refreshLibrary();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Deleted: ${book.title}')),
+          );
+        }
+      } catch (e,s) {
+         ErrorHandler.recordError(e, s, reason: "Error deleting book from library screen", scope: "LibraryScreen");
+         if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error deleting book: $e')),
+          );
+        }
+      }
     }
+  }
+
+  // *** ADDED THIS METHOD ***
+  void _showBookOptions(BuildContext context, Book book) {
+    showModalBottomSheet(
+      context: context,
+      builder: (BuildContext bc) {
+        return SafeArea(
+          child: Wrap(
+            children: <Widget>[
+              ListTile(
+                leading: const Icon(Icons.image_search),
+                title: const Text('Set Book Cover'),
+                onTap: () {
+                  Navigator.pop(bc); // Close the bottom sheet
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => CoverSearchScreen(book: book),
+                    ),
+                  ).then((coverChanged) { // Expecting a boolean true if cover was changed
+                    if (coverChanged == true) {
+                      _refreshLibrary();
+                    }
+                  });
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('Edit Metadata'),
+                onTap: () {
+                  Navigator.pop(bc);
+                  ErrorHandler.logInfo("Edit metadata tapped for ${book.title} - Not implemented.", scope: "LibraryScreen");
+                   ScaffoldMessenger.of(context).showSnackBar(
+                     SnackBar(content: Text('Edit metadata for "${book.title}" (Not Implemented Yet)')),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_forever_outlined, color: Colors.redAccent),
+                title: const Text('Delete Book', style: TextStyle(color: Colors.redAccent)),
+                onTap: () {
+                  Navigator.pop(bc);
+                  _deleteBook(book);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
 
@@ -200,10 +233,10 @@ await _libraryService.addBook(newBook);
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('My Library'),
+         title: const Text('My Library'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh), // Add a refresh button for testing
+            icon: const Icon(Icons.refresh),
             onPressed: _refreshLibrary,
             tooltip: 'Refresh Library',
           ),
@@ -219,30 +252,29 @@ await _libraryService.addBook(newBook);
         ],
       ),
       body: FutureBuilder<List<Book>>(
-        future: _booksFuture,
+         future: _booksFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
-            // You can use your ErrorHandler here
             ErrorHandler.recordError(snapshot.error, snapshot.stackTrace, reason: "Failed to load library");
             return Center(child: Text('Error loading library: ${snapshot.error}'));
           } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
             return Center(
-              child: Column( // Empty state UI
+              child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Icon(Icons.menu_book, size: 80, color: Colors.grey),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: kDefaultPadding),
                   const Text(
                     'Your library is empty.',
                     style: TextStyle(fontSize: 18, color: Colors.grey),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: kSmallPadding),
                   ElevatedButton.icon(
                     icon: const Icon(Icons.add_circle_outline),
                     label: const Text('Import your first book'),
-                    onPressed: _importBook, // This will use the mock add for now
+                    onPressed: _importBook,
                   ),
                 ],
               ),
@@ -254,25 +286,36 @@ await _libraryService.addBook(newBook);
             itemCount: books.length,
             itemBuilder: (context, index) {
               final book = books[index];
-              return ListTile(
-                leading: book.coverImagePath != null && book.coverImagePath!.isNotEmpty
-                ? Image.file(
-                    File(book.coverImagePath!),
-                    width: 50, // Adjust size as needed
-                    height: 70,
-                    fit: BoxFit.cover,
+              Widget leadingWidget;
+              if (book.coverImagePath != null && book.coverImagePath!.isNotEmpty) {
+                File coverFile = File(book.coverImagePath!);
+                leadingWidget = SizedBox( 
+                  width: 50,
+                  height: 70, 
+                  child: Image.file(
+                    coverFile,
+                    fit: BoxFit.cover, 
                     errorBuilder: (context, error, stackTrace) {
-                      // Fallback icon if image fails to load
-                      return const Icon(Icons.book_online_outlined, size: 40);
+                      ErrorHandler.logWarning("Failed to load cover: ${book.coverImagePath} for ${book.title}. Error: $error", scope: "LibraryScreen");
+                      return const Icon(Icons.broken_image, size: 40); 
                     },
-                  )
-                : const Icon(Icons.book_online_outlined, size: 40), // Fallback if no cover
+                  ),
+                );
+              } else {
+                leadingWidget = const Icon(Icons.book_outlined, size: 40); 
+              }
+
+              return ListTile(
+                leading: leadingWidget,
                 title: Text(book.title),
                 subtitle: Text(book.author ?? "Unknown Author"),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                  onPressed: () => _deleteBook(book),
-                  tooltip: 'Delete Book',
+                onLongPress: () { // *** ADDED ON LONG PRESS ***
+                  _showBookOptions(context, book);
+                },
+                trailing: IconButton( 
+                  icon: const Icon(Icons.more_vert), // *** CHANGED ICON ***
+                  onPressed: () => _showBookOptions(context, book), // *** CALLS OPTIONS MENU ***
+                  tooltip: 'More options',
                 ),
                 onTap: () => _openBook(book),
               );
@@ -281,8 +324,8 @@ await _libraryService.addBook(newBook);
         },
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _importBook, // This will use the mock add for now
-        tooltip: 'Import Book (Test Add)',
+        onPressed: _importBook,
+        tooltip: 'Import Book',
         child: const Icon(Icons.add_circle_outline_sharp),
       ),
     );
